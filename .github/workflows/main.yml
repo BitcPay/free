@@ -1,1 +1,199 @@
+name: RDP-Tailscale-Fixed
 
+on:
+  workflow_dispatch:
+
+jobs:
+  secure-rdp:
+    runs-on: windows-latest
+    timeout-minutes: 3600
+
+    steps:
+      # 1. Enable RDP and Configure Firewall
+      - name: Configure RDP Settings
+        run: |
+          # Enable Remote Desktop
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+          
+          # Disable Network Level Authentication (Allows connection without initial auth screen)
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+          
+          # Remove old firewall rules to avoid duplicates
+          netsh advfirewall firewall delete rule name="RDP-Tailscale" 2>$null
+          
+          # Allow port 3389 through firewall
+          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
+          
+          # Restart RDP Service to apply changes
+          Restart-Service -Name TermService -Force
+
+      # 2. Create 3 Users with Secure Passwords
+      - name: Create Multiple Users
+        env:
+          ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD || 'Admin@Secure123' }}
+          USER1_PASSWORD: ${{ secrets.USER1_PASSWORD || 'User1@Secure456' }}
+          USER2_PASSWORD: ${{ secrets.USER2_PASSWORD || 'User2@Secure789' }}
+        run: |
+          # Function to create or update user
+          function Create-Or-UpdateUser {
+              param(
+                  [string]$Username,
+                  [string]$Password,
+                  [string]$Description,
+                  [bool]$IsAdmin = $false
+              )
+              
+              $securePass = ConvertTo-SecureString $Password -AsPlainText -Force
+              
+              if (-not (Get-LocalUser -Name $Username -ErrorAction SilentlyContinue)) {
+                  # Create new user
+                  New-LocalUser -Name $Username -Password $securePass `
+                      -FullName $Description `
+                      -Description $Description `
+                      -AccountNeverExpires
+                  
+                  Write-Host "Created user: $Username"
+              } else {
+                  # Update existing user
+                  Set-LocalUser -Name $Username -Password $securePass
+                  Write-Host "Updated password for: $Username"
+              }
+              
+              # Add to groups
+              Add-LocalGroupMember -Group "Remote Desktop Users" -Member $Username -ErrorAction SilentlyContinue
+              
+              if ($IsAdmin) {
+                  Add-LocalGroupMember -Group "Administrators" -Member $Username -ErrorAction SilentlyContinue
+                  Write-Host "Added $Username to Administrators group"
+              }
+          }
+
+          # Create 3 users:
+          # 1. Administrator user
+          Create-Or-UpdateUser -Username "runneradmin" `
+                               -Password $env:ADMIN_PASSWORD `
+                               -Description "Primary Administrator Account" `
+                               -IsAdmin $true
+          
+          # 2. Standard user 1
+          Create-Or-UpdateUser -Username "rdpuser1" `
+                               -Password $env:USER1_PASSWORD `
+                               -Description "Standard User Account 1" `
+                               -IsAdmin $false
+          
+          # 3. Standard user 2
+          Create-Or-UpdateUser -Username "rdpuser2" `
+                               -Password $env:USER2_PASSWORD `
+                               -Description "Standard User Account 2" `
+                               -IsAdmin $false
+
+          # Verify users were created
+          Write-Host "`nCreated Users Summary:"
+          Write-Host "====================="
+          Get-LocalUser | Where-Object {$_.Name -in @("runneradmin", "rdpuser1", "rdpuser2")} | 
+            Format-Table Name, Enabled, LastLogon, Description -AutoSize
+
+      # 3. Install Tailscale
+      - name: Install Tailscale
+        run: |
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          $installerPath = "$env:TEMP\tailscale.msi"
+          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+          Remove-Item $installerPath -Force
+
+      # 4. Connect Tailscale
+      - name: Establish Tailscale Connection
+        run: |
+          # Bring up Tailscale with auth key. --reset ensures clean state.
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID --reset
+          
+          # Wait for IP assignment
+          $tsIP = $null
+          $retries = 0
+          while (-not $tsIP -and $retries -lt 20) {
+              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+              Start-Sleep -Seconds 3
+              $retries++
+          }
+          
+          if (-not $tsIP) {
+              Write-Error "Tailscale IP not assigned. Check Auth Key."
+              exit 1
+          }
+          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+      
+      # 5. Verify Connectivity
+      - name: Verify RDP Accessibility
+        run: |
+          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
+          if (-not $testResult.TcpTestSucceeded) {
+              Write-Error "RDP Port 3389 is not reachable."
+              exit 1
+          }
+          Write-Host "RDP Port 3389 is Open and Reachable."
+
+      # 6. Display Credentials and Maintain Connection
+      - name: Display Connection Info
+        env:
+          ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD || 'Admin@Secure123' }}
+          USER1_PASSWORD: ${{ secrets.USER1_PASSWORD || 'User1@Secure456' }}
+          USER2_PASSWORD: ${{ secrets.USER2_PASSWORD || 'User2@Secure789' }}
+        run: |
+          Write-Host "`n========================================================"
+          Write-Host "           RDP CONNECTION ESTABLISHED"
+          Write-Host "========================================================"
+          Write-Host "Tailscale IP Address : $env:TAILSCALE_IP"
+          Write-Host "========================================================"
+          Write-Host ""
+          Write-Host "        --- USER CREDENTIALS ---"
+          Write-Host ""
+          Write-Host "┌────────────────────────────────────────────────────┐"
+          Write-Host "│  ADMINISTRATOR ACCOUNT                            │"
+          Write-Host "├────────────────────────────────────────────────────┤"
+          Write-Host "│  Username: runneradmin                            │"
+          Write-Host "│  Password: $env:ADMIN_PASSWORD"
+          Write-Host "│  Privileges: Full Administrator                   │"
+          Write-Host "└────────────────────────────────────────────────────┘"
+          Write-Host ""
+          Write-Host "┌────────────────────────────────────────────────────┐"
+          Write-Host "│  STANDARD USER ACCOUNTS                           │"
+          Write-Host "├────────────────────────────────────────────────────┤"
+          Write-Host "│  Username: rdpuser1                               │"
+          Write-Host "│  Password: $env:USER1_PASSWORD"
+          Write-Host "│  Privileges: Standard User (RDP access only)      │"
+          Write-Host "├────────────────────────────────────────────────────┤"
+          Write-Host "│  Username: rdpuser2                               │"
+          Write-Host "│  Password: $env:USER2_PASSWORD"
+          Write-Host "│  Privileges: Standard User (RDP access only)      │"
+          Write-Host "└────────────────────────────────────────────────────┘"
+          Write-Host ""
+          Write-Host "========================================================"
+          Write-Host "CONNECTION TIPS:"
+          Write-Host "1. Use Microsoft Remote Desktop Client"
+          Write-Host "2. Enter Tailscale IP as computer address"
+          Write-Host "3. Save credentials in RDP client for quick access"
+          Write-Host "4. Administrator account has full system access"
+          Write-Host "5. Standard users have limited privileges"
+          Write-Host "========================================================"
+          Write-Host ""
+          Write-Host "[$(Get-Date)] Session starting..."
+          Write-Host "Press 'Cancel Workflow' in GitHub to terminate session"
+          Write-Host "========================================================"
+          
+          # Keep runner active with timeout protection
+          $startTime = Get-Date
+          $maxDuration = [TimeSpan]::FromMinutes(3550) # Slightly less than workflow timeout
+          
+          while ($true) {
+              $elapsed = (Get-Date) - $startTime
+              if ($elapsed -gt $maxDuration) {
+                  Write-Host "[$(Get-Date)] Maximum session duration reached. Auto-shutdown in 10 minutes..."
+                  break
+              }
+              
+              $hours = [math]::Floor($elapsed.TotalHours)
+              $minutes = $elapsed.Minutes
+              Write-Host "[$(Get-Date)] Session active for ${hours}h ${minutes}m. Time remaining: $((3550 - $elapsed.TotalMinutes)) minutes"
+              Start-Sleep -Seconds 300
+          }
