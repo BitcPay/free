@@ -1,4 +1,4 @@
-name: Fixed
+name: RDP-Tailscale-Fixed
 
 on:
   workflow_dispatch:
@@ -27,23 +27,20 @@ jobs:
           # Restart RDP Service to apply changes
           Restart-Service -Name TermService -Force
 
-      # 2. Create 3 Users with Secure Passwords
+      # 2. Create 3 Users with Same Password
       - name: Create Multiple Users
-        env:
-          ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD || 'Admin@Secure123' }}
-          USER1_PASSWORD: ${{ secrets.USER1_PASSWORD || 'User1@Secure456' }}
-          USER2_PASSWORD: ${{ secrets.USER2_PASSWORD || 'User2@Secure789' }}
         run: |
+          # Define the common password for all users
+          $password = "D12345678@"
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+          
           # Function to create or update user
           function Create-Or-UpdateUser {
               param(
                   [string]$Username,
-                  [string]$Password,
                   [string]$Description,
                   [bool]$IsAdmin = $false
               )
-              
-              $securePass = ConvertTo-SecureString $Password -AsPlainText -Force
               
               if (-not (Get-LocalUser -Name $Username -ErrorAction SilentlyContinue)) {
                   # Create new user
@@ -68,30 +65,35 @@ jobs:
               }
           }
 
-          # Create 3 users:
+          # Create 3 users with same password:
           # 1. Administrator user
           Create-Or-UpdateUser -Username "runneradmin" `
-                               -Password $env:ADMIN_PASSWORD `
                                -Description "Primary Administrator Account" `
                                -IsAdmin $true
           
           # 2. Standard user 1
           Create-Or-UpdateUser -Username "rdpuser1" `
-                               -Password $env:USER1_PASSWORD `
                                -Description "Standard User Account 1" `
                                -IsAdmin $false
           
           # 3. Standard user 2
           Create-Or-UpdateUser -Username "rdpuser2" `
-                               -Password $env:USER2_PASSWORD `
                                -Description "Standard User Account 2" `
                                -IsAdmin $false
 
           # Verify users were created
-          Write-Host "`nCreated Users Summary:"
-          Write-Host "====================="
+          Write-Host "`n========================================"
+          Write-Host "      USERS CREATED SUCCESSFULLY"
+          Write-Host "========================================"
+          Write-Host "All users share the same password: D12345678@"
+          Write-Host "========================================"
+          
           Get-LocalUser | Where-Object {$_.Name -in @("runneradmin", "rdpuser1", "rdpuser2")} | 
-            Format-Table Name, Enabled, LastLogon, Description -AutoSize
+            ForEach-Object {
+                $userType = if ($_.Name -eq "runneradmin") { "Administrator" } else { "Standard User" }
+                Write-Host "User: $($_.Name) - Type: $userType - Status: Enabled"
+            }
+          Write-Host "========================================"
 
       # 3. Install Tailscale
       - name: Install Tailscale
@@ -135,10 +137,6 @@ jobs:
 
       # 6. Display Credentials and Maintain Connection
       - name: Display Connection Info
-        env:
-          ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD || 'Admin@Secure123' }}
-          USER1_PASSWORD: ${{ secrets.USER1_PASSWORD || 'User1@Secure456' }}
-          USER2_PASSWORD: ${{ secrets.USER2_PASSWORD || 'User2@Secure789' }}
         run: |
           Write-Host "`n========================================================"
           Write-Host "           RDP CONNECTION ESTABLISHED"
@@ -146,35 +144,46 @@ jobs:
           Write-Host "Tailscale IP Address : $env:TAILSCALE_IP"
           Write-Host "========================================================"
           Write-Host ""
-          Write-Host "        --- USER CREDENTIALS ---"
+          Write-Host "        --- ALL USERS USE SAME PASSWORD ---"
+          Write-Host "              Password: D12345678@"
           Write-Host ""
+          Write-Host "========================================================"
           Write-Host "┌────────────────────────────────────────────────────┐"
-          Write-Host "│  ADMINISTRATOR ACCOUNT                            │"
+          Write-Host "│  USER 1: ADMINISTRATOR                            │"
           Write-Host "├────────────────────────────────────────────────────┤"
           Write-Host "│  Username: runneradmin                            │"
-          Write-Host "│  Password: $env:ADMIN_PASSWORD"
+          Write-Host "│  Password: D12345678@                             │"
           Write-Host "│  Privileges: Full Administrator                   │"
+          Write-Host "│  Description: Primary admin account               │"
           Write-Host "└────────────────────────────────────────────────────┘"
           Write-Host ""
           Write-Host "┌────────────────────────────────────────────────────┐"
-          Write-Host "│  STANDARD USER ACCOUNTS                           │"
+          Write-Host "│  USER 2: STANDARD USER                            │"
           Write-Host "├────────────────────────────────────────────────────┤"
           Write-Host "│  Username: rdpuser1                               │"
-          Write-Host "│  Password: $env:USER1_PASSWORD"
-          Write-Host "│  Privileges: Standard User (RDP access only)      │"
+          Write-Host "│  Password: D12345678@                             │"
+          Write-Host "│  Privileges: Standard User                        │"
+          Write-Host "│  Description: General purpose account             │"
+          Write-Host "└────────────────────────────────────────────────────┘"
+          Write-Host ""
+          Write-Host "┌────────────────────────────────────────────────────┐"
+          Write-Host "│  USER 3: STANDARD USER                            │"
           Write-Host "├────────────────────────────────────────────────────┤"
           Write-Host "│  Username: rdpuser2                               │"
-          Write-Host "│  Password: $env:USER2_PASSWORD"
-          Write-Host "│  Privileges: Standard User (RDP access only)      │"
+          Write-Host "│  Password: D12345678@                             │"
+          Write-Host "│  Privileges: Standard User                        │"
+          Write-Host "│  Description: Backup/alternative account          │"
           Write-Host "└────────────────────────────────────────────────────┘"
           Write-Host ""
           Write-Host "========================================================"
-          Write-Host "CONNECTION TIPS:"
-          Write-Host "1. Use Microsoft Remote Desktop Client"
-          Write-Host "2. Enter Tailscale IP as computer address"
-          Write-Host "3. Save credentials in RDP client for quick access"
-          Write-Host "4. Administrator account has full system access"
-          Write-Host "5. Standard users have limited privileges"
+          Write-Host "CONNECTION INSTRUCTIONS:"
+          Write-Host "1. Open Microsoft Remote Desktop"
+          Write-Host "2. Enter IP: $env:TAILSCALE_IP"
+          Write-Host "3. Use any username above"
+          Write-Host "4. Password: D12345678@"
+          Write-Host "5. Save credentials for quick access"
+          Write-Host ""
+          Write-Host "RECOMMENDED: Use 'runneradmin' for full access"
           Write-Host "========================================================"
           Write-Host ""
           Write-Host "[$(Get-Date)] Session starting..."
