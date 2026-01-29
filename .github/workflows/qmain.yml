@@ -82,8 +82,8 @@ jobs:
         Write-Host "👤 CREATING USER ACCOUNT"
         Write-Host "======================================================"
         
-        $username = "githubuser"
-        $password = "P@ssw0rd123!"  # Simple hardcoded password for testing
+        $username = "RDP"
+        $password = "D12345678@"  # Simple hardcoded password for testing
         
         echo "RDP_USERNAME=$username" >> $env:GITHUB_ENV
         echo "RDP_PASSWORD=$password" >> $env:GITHUB_ENV
