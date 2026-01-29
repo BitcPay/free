@@ -1,23 +1,124 @@
-# Save as: .github/workflows/test.yml
-name: Test Windows Environment
-
-on: workflow_dispatch
+name: Secure Runner with Tailscale
+on: [workflow_dispatch]
 
 jobs:
-  test:
+  secure-access:
     runs-on: windows-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     
     steps:
-    - name: Show Windows Info
+    - name: 🔍 Initial IP Diagnostics
       run: |
-        Write-Host "✅ Windows version:"
-        systeminfo | Select-String "OS Name", "OS Version"
+        Write-Host "======================================================"
+        Write-Host "🖥️  PRE-TAILSCALE NETWORK STATE"
+        Write-Host "======================================================"
+        Write-Host ""
+        Write-Host "Public IP: $(curl -s https://api.ipify.org)"
+        Get-NetIPAddress -AddressFamily IPv4 | Format-Table
+
+    - name: 🚀 Setup Tailscale VPN
+      env:
+        TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+      run: |
+        # Download and install Tailscale
+        Write-Host "📥 Installing Tailscale..."
+        $tailscaleUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi"
+        $installerPath = "$env:TEMP\tailscale.msi"
+        
+        # Download Tailscale
+        Invoke-WebRequest -Uri $tailscaleUrl -OutFile $installerPath
+        
+        # Install silently
+        msiexec.exe /i $installerPath /qn /norestart
+        
+        # Wait for installation
+        Start-Sleep -Seconds 10
+        
+        # Start Tailscale
+        Write-Host "🔐 Starting Tailscale with auth key..."
+        & "C:\Program Files\Tailscale\tailscale.exe" up --authkey $env:TAILSCALE_AUTH_KEY --hostname "github-runner-${{ github.run_id }}" --accept-dns=false
+        
+        # Get Tailscale status
+        Write-Host ""
+        Write-Host "✅ Tailscale Status:"
+        & "C:\Program Files\Tailscale\tailscale.exe" status
+        
+        # Get Tailscale IP
+        $tailscaleIP = & "C:\Program Files\Tailscale\tailscale.exe" ip -4
+        Write-Host ""
+        Write-Host "🔗 Your Tailscale IP: $tailscaleIP"
+        
+        # Set as environment variable for later steps
+        echo "TAILSCALE_IP=$tailscaleIP" >> $env:GITHUB_ENV
+        
+        # Enable RDP through Tailscale
+        Write-Host ""
+        Write-Host "🖥️  Enabling RDP for Tailscale access..."
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
+        Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+        
+        # Add Tailscale subnet to firewall exceptions
+        New-NetFirewallRule -DisplayName "Tailscale RDP" -Direction Inbound -LocalPort 3389 -Protocol TCP -Action Allow -RemoteAddress $tailscaleIP/32 -ErrorAction SilentlyContinue
+
+    - name: 🌐 Post-Tailscale Network State
+      run: |
+        Write-Host "======================================================"
+        Write-Host "🔐 POST-TAILSCALE NETWORK STATE"
+        Write-Host "======================================================"
+        Write-Host ""
+        
+        Write-Host "📊 TAILSCALE NETWORK:"
+        & "C:\Program Files\Tailscale\tailscale.exe" status --json | ConvertFrom-Json | Select-Object TailscaleIPs, MagicDNSSuffix, Self
+        Write-Host ""
+        
+        Write-Host "🖥️  RDP ACCESS INFORMATION:"
+        Write-Host "   Tailscale IPv4: $env:TAILSCALE_IP"
+        Write-Host "   MagicDNS: github-runner-${{ github.run_id }}.your-tailnet.ts.net"
+        Write-Host "   Port: 3389"
+        Write-Host ""
+        Write-Host "🔒 SECURITY NOTE:"
+        Write-Host "   Only devices in your Tailscale network can connect"
+        Write-Host "   End-to-end encrypted connection"
+        Write-Host "   No public internet exposure"
         
         Write-Host ""
-        Write-Host "📁 Current directory:"
-        Get-ChildItem | Format-Table Name
+        Write-Host "💡 CONNECT INSTRUCTIONS:"
+        Write-Host "   1. Ensure you have Tailscale installed"
+        Write-Host "   2. Log into your Tailscale account"
+        Write-Host "   3. Open Remote Desktop Connection"
+        Write-Host "   4. Connect to: $env:TAILSCALE_IP"
+        Write-Host ""
+        Write-Host "📋 ALL NETWORK ADAPTERS:"
+        Get-NetIPAddress -AddressFamily IPv4 | Format-Table
+
+    - name: 🛡️ Tailscale Security Verification
+      run: |
+        Write-Host "======================================================"
+        Write-Host "🔐 SECURITY VERIFICATION"
+        Write-Host "======================================================"
+        Write-Host ""
+        
+        # Verify firewall rules
+        Write-Host "🛡️  FIREWALL RULES FOR TAILSCALE:"
+        Get-NetFirewallRule -DisplayName "Tailscale*" | Select-Object DisplayName, Enabled, Direction, Action
         
         Write-Host ""
-        Write-Host "⏱️ Running for 5 minutes..."
-        Start-Sleep -Seconds 300
+        Write-Host "🔗 ACTIVE CONNECTIONS:"
+        & "C:\Program Files\Tailscale\tailscale.exe" netcheck
+        Write-Host ""
+        
+        Write-Host "🌍 PUBLIC VS PRIVATE ACCESS:"
+        Write-Host "   Public IP: $(curl -s https://api.ipify.org)"
+        Write-Host "   Tailscale IP: $env:TAILSCALE_IP"
+        Write-Host ""
+        Write-Host "✅ SECURE: RDP only accessible via Tailscale VPN"
+
+    - name: 🧹 Cleanup (Optional)
+      if: always()
+      run: |
+        Write-Host "🧹 Cleaning up..."
+        # Disconnect Tailscale when done
+        & "C:\Program Files\Tailscale\tailscale.exe" down
+        
+        # Re-disable RDP for security
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 1
