@@ -29,113 +29,58 @@ jobs:
         Write-Host "🔧 CONFIGURING RDP ACCESS"
         Write-Host "======================================================"
         
-        # 1. Check current RDP status
-        Write-Host "📊 Current RDP Status:"
-        Get-Service TermService, UmRdpService, SessionEnv | Format-Table Name, Status, StartType
-        
-        # 2. Enable RDP in registry
+        # Enable RDP
         Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
-        
-        # 3. Disable NLA for easier connection
         Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0
-        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 1
         
-        # 4. Start RDP services in correct order
-        Write-Host "🔄 Starting RDP services..."
-        
-        # Set services to auto-start
-        Set-Service -Name SessionEnv -StartupType Automatic -ErrorAction SilentlyContinue
-        Set-Service -Name UmRdpService -StartupType Automatic -ErrorAction SilentlyContinue
+        # Start RDP services
         Set-Service -Name TermService -StartupType Automatic
-        
-        # Start services in order
-        Start-Service SessionEnv -ErrorAction SilentlyContinue
-        Start-Service UmRdpService -ErrorAction SilentlyContinue
         Start-Service TermService
         
-        Write-Host "✅ RDP services started"
-        
-        # 5. Configure firewall
+        # Configure firewall
         Enable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue
         netsh advfirewall firewall add rule name="GitHub Runner RDP" dir=in action=allow protocol=TCP localport=3389
         
-        Write-Host "✅ Firewall configured"
+        Write-Host "✅ RDP configured"
 
-    - name: 👤 Create RDP User Account
+    - name: 👤 Create RDP User with Simple Password
       run: |
         Write-Host "======================================================"
-        Write-Host "👤 SETTING UP RDP USER ACCOUNT"
+        Write-Host "👤 CREATING RDP USER"
         Write-Host "======================================================"
         
-        $username = "github-rdp-user"
+        $username = "githubuser"
         
-        # Generate random password using built-in PowerShell methods
-        # Method 1: Using .NET Cryptography
-        Add-Type -AssemblyName System.Web
-        $password = [System.Web.Security.Membership]::GeneratePassword(12, 3)
+        # SIMPLE password generation without System.Web
+        # Create a predictable but unique password based on run ID
+        $runId = "${{ github.run_id }}"
+        $basePassword = "GitHubRDP" + $runId.Substring($runId.Length - 6) + "!"
         
-        # Method 2: Alternative if Method 1 fails
-        if (-not $password -or $password.Length -lt 8) {
-            Write-Host "⚠️  Using alternative password generation..."
-            $chars = @('abcdefghijkmnpqrstuvwxyz', 'ABCDEFGHJKLMNPQRSTUVWXYZ', '23456789', '!@#$%^&*')
-            $password = -join ((1..12) | ForEach-Object {
-                $charSet = $chars[(Get-Random -Minimum 0 -Maximum $chars.Count)]
-                $charSet[(Get-Random -Minimum 0 -Maximum $charSet.Length)]
-            })
+        # Make it 12 characters exactly
+        if ($basePassword.Length -lt 12) {
+            $basePassword = $basePassword.PadRight(12, '0')
+        } elseif ($basePassword.Length -gt 12) {
+            $basePassword = $basePassword.Substring(0, 12)
         }
         
+        $password = $basePassword
+        
+        # Store credentials
         echo "RDP_USERNAME=$username" >> $env:GITHUB_ENV
         echo "RDP_PASSWORD=$password" >> $env:GITHUB_ENV
         
-        Write-Host "Generated password length: $($password.Length)"
+        Write-Host "Generated password: $password"
         
-        # Check and create/update user
-        $user = Get-LocalUser -Name $username -ErrorAction SilentlyContinue
+        # Create user using NET command (most reliable)
+        Write-Host "Creating user with NET command..."
+        net user $username $password /add /fullname:"GitHub RDP User" /y
+        net user $username /active:yes
         
-        if ($user) {
-            Write-Host "🔄 Updating existing user..."
-            try {
-                $securePassword = ConvertTo-SecureString $password -AsPlainText -Force
-                Set-LocalUser -Name $username -Password $securePassword
-                Enable-LocalUser -Name $username
-                Write-Host "✅ User updated"
-            } catch {
-                Write-Host "❌ Error updating user: $_"
-                # Try alternative method
-                net user $username $password 2>$null
-            }
-        } else {
-            Write-Host "🆕 Creating new user..."
-            try {
-                $securePassword = ConvertTo-SecureString $password -AsPlainText -Force
-                New-LocalUser -Name $username -Password $securePassword -FullName "GitHub RDP User"
-                Enable-LocalUser -Name $username
-                Write-Host "✅ User created"
-            } catch {
-                Write-Host "❌ Error creating user: $_"
-                # Try using net command as fallback
-                net user $username $password /add /fullname:"GitHub RDP User" /y 2>$null
-                net user $username /active:yes 2>$null
-            }
-        }
+        # Add to groups
+        net localgroup "Remote Desktop Users" $username /add
+        net localgroup "Administrators" $username /add
         
-        # Add to required groups using multiple methods
-        Write-Host "👥 Adding user to groups..."
-        
-        # Method 1: PowerShell
-        try {
-            Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username -ErrorAction SilentlyContinue
-            Add-LocalGroupMember -Group "Administrators" -Member $username -ErrorAction SilentlyContinue
-        } catch {
-            # Method 2: net command
-            net localgroup "Remote Desktop Users" $username /add 2>$null
-            net localgroup "Administrators" $username /add 2>$null
-        }
-        
-        # Verify user setup
-        Write-Host ""
-        Write-Host "✅ User verification:"
-        Get-LocalUser -Name $username -ErrorAction SilentlyContinue | Format-Table Name, Enabled -AutoSize
+        Write-Host "✅ User created"
 
     - name: 📋 Show RDP Connection Info
       run: |
@@ -146,44 +91,28 @@ jobs:
         Write-Host ""
         Write-Host "🌐 TAILSCALE ACCESS:"
         Write-Host "   IP Address: $env:TAILSCALE_IP"
-        Write-Host "   DNS: github-rdp-${{ github.run_id }}.your-tailnet.ts.net"
+        Write-Host "   MagicDNS: github-rdp-${{ github.run_id }}.your-tailnet.ts.net"
         Write-Host ""
         Write-Host "🔑 RDP CREDENTIALS:"
         Write-Host "   👤 USERNAME: $env:RDP_USERNAME"
         Write-Host "   🔐 PASSWORD: $env:RDP_PASSWORD"
         Write-Host ""
-        Write-Host "🚀 CONNECT COMMANDS:"
-        Write-Host "   Windows: mstsc /v:$env:TAILSCALE_IP"
-        Write-Host "   macOS: Use Microsoft Remote Desktop"
-        Write-Host "   Linux: xfreerdp /v:$env:TAILSCALE_IP /u:$env:RDP_USERNAME /p:$env:RDP_PASSWORD"
+        Write-Host "🚀 CONNECT NOW:"
+        Write-Host "   mstsc /v:$env:TAILSCALE_IP"
         Write-Host ""
-        Write-Host "⏰ TIME LIMIT: ~25 minutes remaining"
+        Write-Host "⏰ TIME LIMIT: ~25 minutes"
         Write-Host ""
-        Write-Host "🔧 SERVICES STATUS:"
-        Get-Service TermService, UmRdpService, SessionEnv | Format-Table Name, Status -AutoSize
+        Write-Host "🔧 RDP STATUS:"
+        Get-Service TermService | Format-Table Status, Name
         Write-Host ""
         Write-Host "📡 PORT CHECK:"
-        $listening = netstat -an | findstr ":3389" | findstr "LISTENING"
-        if ($listening) {
-            Write-Host "   ✅ Port 3389 is listening"
-        } else {
-            Write-Host "   ❌ Port 3389 is NOT listening"
-            Write-Host "   Trying to restart RDP services..."
-            Start-Service TermService -ErrorAction SilentlyContinue
-        }
+        netstat -an | findstr ":3389" || echo "Port 3389 not listening"
         Write-Host "======================================================"
-        Write-Host ""
-        Write-Host "💡 TIPS:"
-        Write-Host "   1. Make sure Tailscale is running on your local machine"
-        Write-Host "   2. Use the IP if DNS doesn't work"
-        Write-Host "   3. Disable NLA in RDP client if connection fails"
-        Write-Host "   4. Check 'tailscale status' to verify connectivity"
-        Write-Host ""
 
-    - name: ⏳ Keep Alive with Service Monitoring
+    - name: ⏳ Keep Runner Alive
       run: |
         Write-Host "======================================================"
-        Write-Host "🔄 KEEPING RUNNER ACTIVE FOR RDP"
+        Write-Host "🔄 KEEPING RUNNER ACTIVE"
         Write-Host "======================================================"
         
         $timeout = 1500  # 25 minutes
@@ -195,98 +124,44 @@ jobs:
             $minutes = [math]::Floor($remaining / 60)
             $seconds = $remaining % 60
             
-            Write-Host ""
             Write-Host "[$(Get-Date -Format 'HH:mm:ss')] ⏰ Time left: ${minutes}m ${seconds}s"
-            Write-Host "----------------------------------------"
             
-            # Check RDP services
-            Write-Host "🔧 SERVICE STATUS:"
-            $services = @{
-                "TermService" = "Remote Desktop Services"
-                "UmRdpService" = "RDP Redirector"
-                "SessionEnv" = "Remote Desktop Configuration"
+            # Keep RDP service running
+            $rdpService = Get-Service TermService -ErrorAction SilentlyContinue
+            if ($rdpService.Status -ne "Running") {
+                Write-Host "⚠️  RDP service stopped. Restarting..."
+                Start-Service TermService
             }
             
-            foreach ($service in $services.Keys) {
-                $status = Get-Service -Name $service -ErrorAction SilentlyContinue
-                if ($status) {
-                    Write-Host "   $($services[$service]): $($status.Status)"
-                    if ($status.Status -ne "Running" -and $service -eq "TermService") {
-                        Write-Host "   ⚠️  Starting $service..."
-                        Start-Service -Name $service -ErrorAction SilentlyContinue
-                    }
-                } else {
-                    Write-Host "   $($services[$service]): ❌ Not found"
-                }
-            }
-            
-            # Check active connections
-            Write-Host ""
-            Write-Host "📡 CONNECTIONS:"
+            # Show active sessions
             try {
-                $sessionCount = (qwinsta 2>$null | Select-String "rdp-tcp" | Measure-Object).Count
-                Write-Host "   Active RDP sessions: $sessionCount"
-            } catch {
-                Write-Host "   Active RDP sessions: 0"
-            }
+                $sessions = (qwinsta 2>$null | findstr "rdp" | Measure-Object).Count
+                Write-Host "   Active RDP sessions: $sessions"
+            } catch { }
             
-            $listening = (netstat -an 2>$null | Select-String ":3389" | Select-String "LISTENING" | Measure-Object).Count
-            Write-Host "   Port 3389 listening: $(if ($listening -gt 0) {'✅'} else {'❌'})"
-            
-            Write-Host "----------------------------------------"
             Start-Sleep -Seconds 30
         }
         
-        Write-Host ""
-        Write-Host "⏰ Time limit reached, starting cleanup..."
+        Write-Host "⏰ Time's up! Cleaning up..."
 
-    - name: 🧹 Cleanup Before Exit
+    - name: 🧹 Cleanup
       if: always()
       run: |
         Write-Host "======================================================"
-        Write-Host "🧹 CLEANING UP"
+        Write-Host "🧹 CLEANUP"
         Write-Host "======================================================"
         
-        Write-Host "🛑 Stopping RDP services..."
+        # Remove user
+        net user $env:RDP_USERNAME /delete /y 2>$null
         
-        # Stop services in reverse order
-        $services = @("TermService", "UmRdpService", "SessionEnv")
+        # Disable RDP
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 1
+        Stop-Service TermService -Force -ErrorAction SilentlyContinue
         
-        foreach ($service in $services) {
-            try {
-                $svc = Get-Service -Name $service -ErrorAction SilentlyContinue
-                if ($svc -and $svc.Status -eq "Running") {
-                    Write-Host "   Stopping $service..."
-                    Stop-Service -Name $service -Force -ErrorAction SilentlyContinue
-                    Write-Host "   ✅ Stopped"
-                }
-            } catch {
-                Write-Host "   ⚠️  Could not stop $service"
-            }
-            Start-Sleep -Seconds 1
-        }
-        
-        Write-Host ""
-        Write-Host "🔒 Disabling RDP..."
-        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 1 -ErrorAction SilentlyContinue
-        
-        Write-Host ""
-        Write-Host "👤 Removing user..."
-        $username = "github-rdp-user"
-        try {
-            Remove-LocalUser -Name $username -ErrorAction SilentlyContinue
-            Write-Host "   ✅ User removed"
-        } catch {
-            Write-Host "   ⚠️  Could not remove user (may not exist)"
-        }
-        
-        Write-Host ""
-        Write-Host "🛡️  Removing firewall rule..."
+        # Remove firewall rule
         netsh advfirewall firewall delete rule name="GitHub Runner RDP" 2>$null
         
-        Write-Host ""
-        Write-Host "🔌 Disconnecting Tailscale..."
+        # Disconnect Tailscale
         & "C:\Program Files\Tailscale\tailscale.exe" down 2>$null
         
-        Write-Host ""
-        Write-Host "✅ Cleanup completed!"
+        Write-Host "✅ Cleanup complete!"
