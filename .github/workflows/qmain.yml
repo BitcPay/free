@@ -1,23 +1,162 @@
-- name: Debug RDP Status
-  run: |
-    Write-Host "=== RDP STATUS CHECK ==="
+name: Show Runner IP Addresses
+on: [workflow_dispatch]
+
+jobs:
+  diagnose-ips:
+    runs-on: windows-latest
+    timeout-minutes: 10
     
-    # Check RDP service
-    $service = Get-Service TermService
-    Write-Host "RDP Service: $($service.Status)"
-    
-    # Check registry settings
-    $rdpEnabled = Get-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -ErrorAction SilentlyContinue
-    Write-Host "RDP Enabled: $(if ($rdpEnabled.fDenyTSConnections -eq 0) {'YES'} else {'NO'})"
-    
-    # Check firewall
-    $firewallRule = Get-NetFirewallRule -DisplayName "RDP-Tailscale" -ErrorAction SilentlyContinue
-    Write-Host "Firewall Rule: $(if ($firewallRule) {'ACTIVE'} else {'MISSING'})"
-    
-    # Check listening ports
-    Write-Host "Port 3389 Listening:"
-    netstat -an | select-string ":3389" | select-string "LISTENING"
-    
-    # Check user
-    $user = Get-LocalUser -Name "runneradmin" -ErrorAction SilentlyContinue
-    Write-Host "runneradmin user: $(if ($user) {'EXISTS'} else {'MISSING'})"
+    steps:
+    - name: 🔍 Show ALL IP Addresses
+      run: |
+        Write-Host ""
+        Write-Host "======================================================"
+        Write-Host "🖥️  GITHUB RUNNER IP DIAGNOSTICS"
+        Write-Host "======================================================"
+        Write-Host ""
+        
+        # 1. Get Public IP (What the internet sees)
+        Write-Host "🌐 PUBLIC/EXTERNAL IP:"
+        try {
+            $publicIP = (Invoke-RestMethod -Uri "https://api.ipify.org" -TimeoutSec 10)
+            Write-Host "   Public IPv4: $publicIP"
+        } catch {
+            Write-Host "   ❌ Could not get public IP"
+        }
+        
+        try {
+            $publicIPv6 = (Invoke-RestMethod -Uri "https://api64.ipify.org" -TimeoutSec 10)
+            Write-Host "   Public IPv6: $publicIPv6"
+        } catch {
+            Write-Host "   ❌ Could not get public IPv6"
+        }
+        
+        Write-Host ""
+        
+        # 2. Get ALL Network Interface IPs
+        Write-Host "🔌 LOCAL NETWORK INTERFACES:"
+        $adapters = Get-NetIPAddress | Where-Object {$_.AddressFamily -in @('IPv4', 'IPv6')} | Sort-Object InterfaceIndex
+        
+        foreach ($adapter in $adapters) {
+            $iface = Get-NetAdapter -InterfaceIndex $adapter.InterfaceIndex -ErrorAction SilentlyContinue
+            $ifaceName = if ($iface) { $iface.Name } else { "N/A" }
+            $ifaceStatus = if ($iface) { $iface.Status } else { "Unknown" }
+            
+            Write-Host "   Interface $($adapter.InterfaceIndex): $ifaceName ($ifaceStatus)"
+            Write-Host "     IP: $($adapter.IPAddress)/$($adapter.PrefixLength)"
+            Write-Host "     Type: $($adapter.AddressFamily)"
+            if ($adapter.IPAddress -like "169.254.*") {
+                Write-Host "     ⚠️  APIPA (No DHCP)"
+            }
+            Write-Host ""
+        }
+        
+        Write-Host ""
+        
+        # 3. RDP Specific Check
+        Write-Host "🖱️  RDP STATUS:"
+        $rdpEnabled = Get-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -ErrorAction SilentlyContinue
+        Write-Host "   Service Enabled: $(if ($rdpEnabled.fDenyTSConnections -eq 0) {'✅ YES'} else {'❌ NO'})"
+        
+        # Check if port 3389 is listening
+        $rdpPort = netstat -an | select-string ":3389" | select-string "LISTENING"
+        Write-Host "   Port 3389 Listening: $(if ($rdpPort) {'✅ YES'} else {'❌ NO'})"
+        
+        Write-Host ""
+        
+        # 4. Connectivity Test
+        Write-Host "📡 CONNECTIVITY TESTS:"
+        Write-Host "   Can connect to Google:"
+        $googleTest = Test-NetConnection www.google.com -Port 443 -WarningAction SilentlyContinue
+        Write-Host "     $(if ($googleTest.TcpTestSucceeded) {'✅ YES'} else {'❌ NO'})"
+        
+        Write-Host "   Inbound connections allowed:"
+        $firewallProfile = Get-NetFirewallProfile -Name Public
+        Write-Host "     Firewall Public Profile: $($firewallProfile.DefaultInboundAction)"
+        
+        Write-Host ""
+        
+        # 5. Why RDP Won't Work Directly
+        Write-Host "⚠️  IMPORTANT: WHY YOU CAN'T RDP DIRECTLY TO THIS IP:"
+        Write-Host "   1. GitHub runners are BEHIND NAT"
+        Write-Host "   2. No public inbound connections allowed"
+        Write-Host "   3. IP changes every workflow run"
+        Write-Host "   4. GitHub firewall blocks inbound ports"
+        Write-Host ""
+        Write-Host "💡 SOLUTION: Use Tailscale/Ngrok (see below)"
+        
+        Write-Host ""
+        Write-Host "======================================================"
+
+    - name: 🌐 Get Detailed IP Info
+      run: |
+        Write-Host ""
+        Write-Host "📊 EXTENDED IP INFORMATION:"
+        Write-Host ""
+        
+        # Get IP location info
+        try {
+            $ipInfo = Invoke-RestMethod -Uri "http://ip-api.com/json/" -TimeoutSec 5
+            Write-Host "📍 LOCATION INFO:"
+            Write-Host "   Country: $($ipInfo.country)"
+            Write-Host "   Region: $($ipInfo.regionName)"
+            Write-Host "   City: $($ipInfo.city)"
+            Write-Host "   ISP: $($ipInfo.isp)"
+            Write-Host "   AS: $($ipInfo.as)"
+        } catch {
+            Write-Host "   ❌ Could not get location info"
+        }
+        
+        Write-Host ""
+        
+        # Network routes
+        Write-Host "🛣️  NETWORK ROUTES (first 5):"
+        Get-NetRoute -AddressFamily IPv4 | Select-Object -First 5 | ForEach-Object {
+            Write-Host "   Destination: $($_.DestinationPrefix) -> Gateway: $($_.NextHop)"
+        }
+
+    - name: 🚀 Setup Public RDP with Ngrok (Optional)
+      if: false  # Set to true to enable
+      run: |
+        Write-Host ""
+        Write-Host "======================================================"
+        Write-Host "🚀 HOW TO MAKE RDP PUBLICLY ACCESSIBLE"
+        Write-Host "======================================================"
+        Write-Host ""
+        Write-Host "Option 1: Use Ngrok (Tunnel)"
+        Write-Host "   1. Get auth token from ngrok.com"
+        Write-Host "   2. Add to GitHub Secrets as NGROK_AUTH_TOKEN"
+        Write-Host "   3. Run: ngrok tcp 3389"
+        Write-Host "   4. Get public URL like: 0.tcp.ngrok.io:12345"
+        Write-Host ""
+        Write-Host "Option 2: Use Tailscale (VPN)"
+        Write-Host "   1. Get auth key from Tailscale admin"
+        Write-Host "   2. Add to GitHub Secrets as TAILSCALE_AUTH_KEY"
+        Write-Host "   3. Run: tailscale up --authkey=xxx"
+        Write-Host "   4. Connect via Tailscale IP"
+        Write-Host ""
+        Write-Host "Option 3: Cloud VM (Permanent)"
+        Write-Host "   1. Create Azure/AWS Windows VM"
+        Write-Host "   2. Install GitHub self-hosted runner"
+        Write-Host "   3. Connect via VM's public IP"
+        Write-Host "======================================================"
+
+    - name: 📋 Copy-Paste Commands
+      run: |
+        Write-Host ""
+        Write-Host "🛠️  DIAGNOSTIC COMMANDS YOU CAN RUN:"
+        Write-Host ""
+        Write-Host "Get all IPs:"
+        Write-Host "  Get-NetIPAddress | Format-Table"
+        Write-Host ""
+        Write-Host "Check RDP service:"
+        Write-Host "  Get-Service TermService"
+        Write-Host ""
+        Write-Host "Check listening ports:"
+        Write-Host "  netstat -an | findstr :3389"
+        Write-Host ""
+        Write-Host "Test port connectivity:"
+        Write-Host "  Test-NetConnection -ComputerName 127.0.0.1 -Port 3389"
+        Write-Host ""
+        Write-Host "Public IP check:"
+        Write-Host "  curl https://api.ipify.org"
