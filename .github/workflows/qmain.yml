@@ -155,15 +155,15 @@ jobs:
         Write-Host "🔄 KEEPING RUNNER ALIVE"
         Write-Host "======================================================"
         
-        Write-Host "Runner will stay active until timeout (30 minutes total)"
+        Write-Host "Runner will stay active until timeout (30000000 minutes total)"
         Write-Host "You can now connect via RDP using the credentials above"
         Write-Host ""
         Write-Host "Press Ctrl+C in logs to stop early"
         Write-Host ""
         
         # Just sleep to keep runner alive
-        # GitHub will auto-timeout after 30 minutes
-        Write-Host "Sleeping for 1500 seconds (25 minutes)..."
+        # GitHub will auto-timeout after 30000000 minutes
+        Write-Host "Sleeping for 1500 seconds (30000000 minutes)..."
         Start-Sleep -Seconds 1500
         
         Write-Host "⏰ Time almost up, preparing to exit..."
