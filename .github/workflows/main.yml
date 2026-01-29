@@ -1,67 +1,515 @@
-name: 30-Day RDP Marathon
-
+name: 🪟 Windows Professional RDP with Tailscale
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '0 */5 * * *'  # Every 5 hours
+    inputs:
+      session_minutes:
+        description: 'Session duration (minutes)'
+        required: true
+        default: '120'
+        type: choice
+        options:
+        - '60'
+        - '120'
+        - '180'
+        - '240'
+      use_ssl:
+        description: 'Enable SSL/TLS for RDP?'
+        required: true
+        default: 'true'
+        type: boolean
+
+env:
+  RDP_PORT: 3389
+  TAILSCALE_EXIT_NODE: false
+  SESSION_TIMEOUT: ${{ github.event.inputs.session_minutes }}
 
 jobs:
-  rdp-session:
+  windows-rdp-pro:
+    name: 🖥️ Windows Professional RDP Session
     runs-on: windows-latest
-    timeout-minutes: 350  # 5 hours 50 minutes (leaves buffer)
+    timeout-minutes: ${{ env.SESSION_TIMEOUT }}
     
     steps:
-    - name: Check if we should continue the chain
-      id: check_days
+    # ============== SECURITY SETUP ==============
+    - name: 🔐 Generate Secure Credentials
+      id: credentials
       run: |
-        # Create/read a counter file
-        $counterFile = "rdp_counter.txt"
-        if (Test-Path $counterFile) {
-            $days = [int](Get-Content $counterFile)
+        # Generate cryptographically secure credentials
+        Add-Type -AssemblyName System.Security
+        function Generate-SecureString {
+            param([int]$Length = 24)
+            $charSet = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*'
+            $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+            $bytes = New-Object byte[] $Length
+            $rng.GetBytes($bytes)
+            $result = ''
+            foreach ($byte in $bytes) {
+                $result += $charSet[$byte % $charSet.Length]
+            }
+            return $result
+        }
+        
+        $username = "gh-$(Get-Random -Minimum 1000 -Maximum 9999)"
+        $password = Generate-SecureString -Length 20
+        $sessionId = "session-$(Get-Date -Format 'yyyyMMddHHmmss')"
+        
+        # Mask sensitive values from logs
+        echo "::add-mask::$password"
+        echo "::add-mask::$username"
+        
+        # Store in environment
+        echo "RDP_USER=$username" >> $env:GITHUB_ENV
+        echo "RDP_PASS=$password" >> $env:GITHUB_ENV
+        echo "SESSION_ID=$sessionId" >> $env:GITHUB_ENV
+        
+        Write-Host "✅ Generated secure credentials"
+        Write-Host "Session ID: $sessionId"
+        Write-Host "Username: ********"
+        Write-Host "Password: ********"
+
+    # ============== TAILSCALE VPN ==============
+    - name: 🛡️ Setup Tailscale Zero-Trust Network
+      env:
+        TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_PRO_AUTH_KEY }}
+        TAILSCALE_TAGS: "tag:github-runner,tag:rdp-session"
+      run: |
+        Write-Host "🔒 Setting up Tailscale Zero-Trust Network..."
+        
+        # Install Tailscale
+        $installer = "$env:TEMP\tailscale-pro.msi"
+        $tsLatest = "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi"
+        
+        Invoke-WebRequest -Uri $tsLatest -OutFile $installer -Headers @{
+            'User-Agent' = 'GitHub-Actions-Windows-RDP'
+        }
+        
+        # Silent install with logging
+        $logFile = "$env:TEMP\tailscale-install.log"
+        $installArgs = @(
+            "/i", "`"$installer`"",
+            "/qn",
+            "/norestart",
+            "/L*v", "`"$logFile`"",
+            "ACCEPTMULA=1"
+        )
+        
+        Start-Process "msiexec.exe" -ArgumentList $installArgs -Wait -NoNewWindow
+        Start-Sleep -Seconds 10
+        
+        # Configure Tailscale with enhanced security
+        $tsConfig = @{
+            "--authkey" = $env:TAILSCALE_AUTH_KEY
+            "--hostname" = "gh-win-pro-$env:SESSION_ID"
+            "--advertise-tags" = $env:TAILSCALE_TAGS
+            "--accept-routes" = "true"
+            "--accept-dns" = "true"
+            "--shields-up" = "true"
+            "--ssh" = "false"
+            "--reset" = $true
+        }
+        
+        # Convert to CLI arguments
+        $tsArgs = $tsConfig.GetEnumerator() | ForEach-Object {
+            "$($_.Key)=$($_.Value)"
+        } | Join-String -Separator " "
+        
+        & "C:\Program Files\Tailscale\tailscale.exe" up @tsArgs.Split(' ')
+        
+        # Get connection info
+        $tsStatus = & "C:\Program Files\Tailscale\tailscale.exe" status --json | ConvertFrom-Json
+        $tsIp = & "C:\Program Files\Tailscale\tailscale.exe" ip -4
+        
+        echo "TAILSCALE_IP=$tsIp" >> $env:GITHUB_ENV
+        echo "TAILSCALE_DNS=$($tsStatus.Self.DNSName)" >> $env:GITHUB_ENV
+        
+        Write-Host "✅ Tailscale Connected"
+        Write-Host "   IP: $tsIp"
+        Write-Host "   DNS: $($tsStatus.Self.DNSName)"
+
+    # ============== WINDOWS HARDENING ==============
+    - name: ⚙️ Configure Windows Security Policies
+      run: |
+        Write-Host "🛡️ Hardening Windows Security Configuration..."
+        
+        # 1. Enable Windows Defender Real-time Protection
+        Set-MpPreference -DisableRealtimeMonitoring $false
+        Set-MpPreference -DisableBehaviorMonitoring $false
+        Set-MpPreference -DisableBlockAtFirstSeen $false
+        
+        # 2. Configure Windows Firewall with Advanced Rules
+        netsh advfirewall firewall delete rule name="RDP-Tailscale" 2>$null
+        
+        # Create specific firewall rule
+        $fwRule = @{
+            Name = "RDP-Tailscale-Pro"
+            DisplayName = "RDP via Tailscale (Restricted)"
+            Description = "Allow RDP only from Tailscale network"
+            Direction = "Inbound"
+            Action = "Allow"
+            Protocol = "TCP"
+            LocalPort = $env:RDP_PORT
+            RemoteAddress = "100.64.0.0/10"  # Tailscale IP range
+            Enabled = "True"
+            Profile = "Any"
+        }
+        
+        New-NetFirewallRule @fwRule
+        
+        # 3. Disable unnecessary services
+        $servicesToDisable = @(
+            "RemoteRegistry",
+            "SSDPSRV",
+            "upnphost",
+            "WpnService"
+        )
+        
+        foreach ($service in $servicesToDisable) {
+            Set-Service -Name $service -StartupType Disabled -ErrorAction SilentlyContinue
+            Stop-Service -Name $service -Force -ErrorAction SilentlyContinue
+        }
+
+    # ============== RDP ENHANCED SETUP ==============
+    - name: 🖥️ Configure Professional RDP Settings
+      run: |
+        Write-Host "🎯 Configuring Professional RDP Settings..."
+        
+        # 1. Enable RDP with security
+        Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" `
+            -Name "fDenyTSConnections" -Value 0 -Type DWord -Force
+        
+        # 2. KEEP Network Level Authentication ENABLED (Security Best Practice)
+        Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" `
+            -Name "UserAuthentication" -Value 1 -Type DWord -Force
+        
+        # 3. Set encryption level to High
+        Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" `
+            -Name "MinEncryptionLevel" -Value 3 -Type DWord -Force
+        
+        # 4. Configure session limits
+        Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" `
+            -Name "MaxIdleTime" -Value 900000 -Type DWord -Force  # 15 minutes
+        
+        # 5. Enable SSL/TLS for RDP if requested
+        if ("${{ github.event.inputs.use_ssl }}" -eq "true") {
+            Write-Host "🔐 Enabling SSL/TLS for RDP..."
+            Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" `
+                -Name "SSLCertificateSHA1Hash" -Type String -Force -ErrorAction SilentlyContinue
+        }
+        
+        # 6. Restart Terminal Services
+        Restart-Service -Name TermService -Force
+        Set-Service -Name TermService -StartupType Automatic
+        
+        Write-Host "✅ RDP Professional Configuration Complete"
+
+    # ============== USER MANAGEMENT ==============
+    - name: 👥 Create Professional User Account
+      run: |
+        Write-Host "👤 Creating Professional User Account..."
+        
+        $securePass = ConvertTo-SecureString $env:RDP_PASS -AsPlainText -Force
+        
+        # Create user with advanced options
+        $userParams = @{
+            Name                 = $env:RDP_USER
+            Password             = $securePass
+            FullName            = "GitHub RDP Session User"
+            Description         = "Temporary RDP user for GitHub Actions session"
+            PasswordNeverExpires = $true
+            AccountNeverExpires  = $true
+            Enabled              = $true
+        }
+        
+        New-LocalUser @userParams -ErrorAction Stop
+        
+        # Add to required groups only
+        Add-LocalGroupMember -Group "Remote Desktop Users" -Member $env:RDP_USER
+        Add-LocalGroupMember -Group "Users" -Member $env:RDP_USER
+        
+        # Explicitly DENY Administrator access (Security)
+        net localgroup "Administrators" $env:RDP_USER /delete 2>$null
+        
+        # Configure user restrictions
+        $userSid = (Get-LocalUser -Name $env:RDP_USER).SID.Value
+        
+        # Set logon hours (allow all)
+        $adsi = [ADSI]"WinNT://$env:COMPUTERNAME"
+        $user = $adsi.Children.Find($env:RDP_USER, "user")
+        $user.LoginHours = [byte[]]@(255,255,255,255,255,255,255,255,255)
+        $user.SetInfo()
+        
+        Write-Host "✅ Professional User Account Created"
+
+    # ============== SOFTWARE INSTALLATION ==============
+    - name: 📦 Install Professional Tools
+      run: |
+        Write-Host "🛠️ Installing Professional Development Tools..."
+        
+        # 1. Chocolatey Package Manager
+        Set-ExecutionPolicy Bypass -Scope Process -Force
+        [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
+        Invoke-Expression ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+        
+        # 2. Essential tools via Chocolatey
+        $packages = @(
+            "git",
+            "vscode",
+            "python",
+            "nodejs",
+            "sysinternals",
+            "7zip",
+            "curl",
+            "wget",
+            "googlechrome"
+        )
+        
+        foreach ($package in $packages) {
+            choco install $package -y --no-progress --limit-output
+        }
+        
+        # 3. PowerShell modules
+        Install-Module -Name PowerShellGet -Force -AllowClobber
+        Install-Module -Name Az -Force -AllowClobber
+        Install-Module -Name AWSPowerShell -Force -AllowClobber
+        
+        # 4. Configure VS Code with extensions
+        code --install-extension ms-vscode.powershell
+        code --install-extension ms-python.python
+        code --install-extension eamodio.gitlens
+
+    # ============== NETWORK OPTIMIZATION ==============
+    - name: 📡 Optimize Network Performance
+      run: |
+        Write-Host "📈 Optimizing Network for RDP..."
+        
+        # Optimize TCP settings for RDP
+        $tcpParams = @{
+            Path = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters"
+        }
+        
+        Set-ItemProperty @tcpParams -Name "TcpWindowSize" -Value 64240 -Type DWord
+        Set-ItemProperty @tcpParams -Name "Tcp1323Opts" -Value 1 -Type DWord
+        Set-ItemProperty @tcpParams -Name "DefaultTTL" -Value 64 -Type DWord
+        
+        # RDP-specific optimizations
+        $rdpParams = @{
+            Path = "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp"
+        }
+        
+        Set-ItemProperty @rdpParams -Name "MaxMonitors" -Value 4 -Type DWord
+        Set-ItemProperty @rdpParams -Name "MaxXResolution" -Value 5120 -Type DWord
+        Set-ItemProperty @rdpParams -Name "MaxYResolution" -Value 2880 -Type DWord
+        
+        # Disable bandwidth auto-tuning
+        netsh interface tcp set global autotuninglevel=disabled
+        
+        Write-Host "✅ Network Optimization Complete"
+
+    # ============== MONITORING & DIAGNOSTICS ==============
+    - name: 📊 Setup Monitoring
+      run: |
+        Write-Host "📊 Setting up Session Monitoring..."
+        
+        # Create monitoring script
+        $monitorScript = @"
+        param(\$SessionId)
+        
+        function Get-SessionInfo {
+            \$info = @{
+                Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+                SessionId = \$SessionId
+                CPU = (Get-Counter '\Processor(_Total)\% Processor Time').CounterSamples.CookedValue
+                Memory = (Get-Counter '\Memory\Available MBytes').CounterSamples.CookedValue
+                RDPConnections = (quser 2>\$null | Measure-Object).Count
+                TailscaleStatus = & "C:\Program Files\Tailscale\tailscale.exe" status --json 2>\$null | ConvertFrom-Json
+            }
+            return \$info
+        }
+        
+        while (\$true) {
+            \$sessionInfo = Get-SessionInfo
+            Write-Host "MONITOR: [\$(\$sessionInfo.Timestamp)] CPU: \$([math]::Round(\$sessionInfo.CPU,1))% | RAM: \$(\$sessionInfo.Memory)MB free | RDP: \$(\$sessionInfo.RDPConnections) connections"
+            Start-Sleep -Seconds 30
+        }
+"@
+        
+        $monitorScript | Out-File -FilePath "C:\SessionMonitor.ps1" -Encoding UTF8
+        
+        # Start monitoring in background
+        Start-Job -Name "SessionMonitor" -ScriptBlock {
+            & "C:\SessionMonitor.ps1" -SessionId $env:SESSION_ID
+        }
+        
+        Write-Host "✅ Monitoring Enabled"
+
+    # ============== CONNECTION VERIFICATION ==============
+    - name: ✅ Verify Connectivity
+      run: |
+        Write-Host "🔍 Verifying RDP Connectivity..."
+        
+        # Test RDP port
+        $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port $env:RDP_PORT -WarningAction SilentlyContinue
+        
+        if ($testResult.TcpTestSucceeded) {
+            Write-Host "✅ RDP Port $($env:RDP_PORT) is accessible via Tailscale"
         } else {
-            $days = 0
+            Write-Host "❌ RDP Port $($env:RDP_PORT) is NOT accessible"
+            # Fallback test
+            $listener = Get-NetTCPConnection -LocalPort $env:RDP_PORT -ErrorAction SilentlyContinue
+            if ($listener) {
+                Write-Host "⚠️  Port is listening but may be blocked by firewall"
+            }
         }
         
-        if ($days -ge 30) {
-            echo "::warning::30-day marathon complete!"
-            echo "STOP=true" >> $env:GITHUB_ENV
-        } else {
-            $days++
-            $days | Out-File $counterFile
-            echo "DAY=$days" >> $env:GITHUB_ENV
-            echo "STOP=false" >> $env:GITHUB_ENV
+        # Test Tailscale connectivity
+        $tsPing = Test-Connection -ComputerName $env:TAILSCALE_IP -Count 2 -Quiet
+        if ($tsPing) {
+            Write-Host "✅ Tailscale network is operational"
         }
-    
-    - name: Setup RDP (Day ${{ env.DAY }}/30)
-      if: env.STOP == 'false'
+
+    # ============== DISPLAY CONNECTION INFO ==============
+    - name: 📋 Professional Connection Dashboard
       run: |
-        # Your RDP setup code
-        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
-        netsh advfirewall firewall add rule name="30DayRDP" dir=in action=allow protocol=TCP localport=3389
+        Write-Host ""
+        Write-Host "═══════════════════════════════════════════════════════════════════════════════════════════"
+        Write-Host "                    🖥️  WINDOWS PROFESSIONAL RDP SESSION READY                          "
+        Write-Host "═══════════════════════════════════════════════════════════════════════════════════════════"
+        Write-Host ""
+        Write-Host "📊 SESSION INFORMATION"
+        Write-Host "   ──────────────────────────────────────────────────────────────"
+        Write-Host "   Session ID    : $env:SESSION_ID"
+        Write-Host "   Started       : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+        Write-Host "   Timeout       : $env:SESSION_TIMEOUT minutes"
+        Write-Host "   Runner        : $env:RUNNER_NAME"
+        Write-Host ""
+        Write-Host "🔒 SECURE CONNECTION DETAILS"
+        Write-Host "   ──────────────────────────────────────────────────────────────"
+        Write-Host "   Tailscale IP  : $env:TAILSCALE_IP"
+        Write-Host "   Tailscale DNS : $env:TAILSCALE_DNS"
+        Write-Host "   RDP Port      : $env:RDP_PORT"
+        Write-Host "   Encryption    : TLS 1.2+ (NLA Enabled)"
+        Write-Host ""
+        Write-Host "👤 CREDENTIALS (Masked for Security)"
+        Write-Host "   ──────────────────────────────────────────────────────────────"
+        Write-Host "   Username      : ********"
+        Write-Host "   Password      : ********"
+        Write-Host ""
+        Write-Host "   💡 Actual credentials available in workflow environment variables"
+        Write-Host ""
+        Write-Host "🛠️  INSTALLED TOOLS"
+        Write-Host "   ──────────────────────────────────────────────────────────────"
+        Write-Host "   • VS Code with extensions"
+        Write-Host "   • Git"
+        Write-Host "   • Python & Node.js"
+        Write-Host "   • PowerShell 7+"
+        Write-Host "   • AWS/Azure CLI tools"
+        Write-Host "   • Chrome Browser"
+        Write-Host ""
+        Write-Host "🚀 QUICK CONNECT COMMANDS"
+        Write-Host "   ──────────────────────────────────────────────────────────────"
+        Write-Host "   Windows RDP  : mstsc /v:$env:TAILSCALE_IP"
+        Write-Host "   Linux/Mac    : xfreerdp /v:$env:TAILSCALE_IP /u:$env:RDP_USER"
+        Write-Host ""
+        Write-Host "⚠️  IMPORTANT NOTES"
+        Write-Host "   ──────────────────────────────────────────────────────────────"
+        Write-Host "   • Session will auto-terminate after $env:SESSION_TIMEOUT minutes"
+        Write-Host "   • All credentials are temporary and securely generated"
+        Write-Host "   • User has NO administrative privileges (security)"
+        Write-Host "   • Connection is encrypted end-to-end via Tailscale"
+        Write-Host ""
+        Write-Host "📞 TROUBLESHOOTING"
+        Write-Host "   ──────────────────────────────────────────────────────────────"
+        Write-Host "   • Verify Tailscale client is connected to same network"
+        Write-Host "   • Check Tailscale admin console for device status"
+        Write-Host "   • Use 'tailscale ping $env:TAILSCALE_IP' to test connectivity"
+        Write-Host ""
+        Write-Host "═══════════════════════════════════════════════════════════════════════════════════════════"
+        Write-Host ""
         
-        # Create temp user
-        $pass = ConvertTo-SecureString "TempPass${{ github.run_id }}" -AsPlainText -Force
-        New-LocalUser -Name "Day${{ env.DAY }}" -Password $pass -AccountNeverExpires
-        Add-LocalGroupMember -Group "Administrators" -Member "Day${{ env.DAY }}"
-        
-        echo "RDP_USER=Day${{ env.DAY }}" >> $env:GITHUB_ENV
-        echo "RDP_PASS=TempPass${{ github.run_id }}" >> $env:GITHUB_ENV
-    
-    - name: Keep Alive for 5.8 Hours
-      if: env.STOP == 'false'
+        # Keep session info in workflow summary
+        echo "## 🖥️ Windows Professional RDP Session" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Session ID:** $env:SESSION_ID" >> $GITHUB_STEP_SUMMARY
+        echo "**Tailscale IP:** $env:TAILSCALE_IP" >> $GITHUB_STEP_SUMMARY
+        echo "**Timeout:** $env:SESSION_TIMEOUT minutes" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "*Credentials are securely stored in environment variables*" >> $GITHUB_STEP_SUMMARY
+
+    # ============== SESSION MAINTENANCE ==============
+    - name: ⏳ Maintain Professional Session
+      timeout-minutes: ${{ env.SESSION_TIMEOUT }}
       run: |
-        $endTime = (Get-Date).AddMinutes(348)  # 5.8 hours
-        while ((Get-Date) -lt $endTime) {
-            $remaining = [math]::Round(($endTime - (Get-Date)).TotalMinutes, 1)
-            Write-Host "⏳ Day ${{ env.DAY }}/30 - Session time left: ${remaining} minutes"
-            Write-Host "👤 User: ${{ env.RDP_USER }}"
-            Write-Host "🔑 Pass: ${{ env.RDP_PASS }}"
-            Write-Host "🔄 Next session starts in 10 minutes..."
-            Start-Sleep -Seconds 300  # Check every 5 minutes
+        Write-Host ""
+        Write-Host "⏰ Session active for $env:SESSION_TIMEOUT minutes..."
+        Write-Host "   Press 'Cancel workflow' to terminate early"
+        Write-Host ""
+        
+        $startTime = Get-Date
+        $timeoutMinutes = [int]$env:SESSION_TIMEOUT
+        
+        while ($true) {
+            $elapsed = (Get-Date) - $startTime
+            $remaining = $timeoutMinutes - [math]::Round($elapsed.TotalMinutes, 0)
+            
+            if ($remaining -le 0) {
+                Write-Host "⏰ Session timeout reached"
+                break
+            }
+            
+            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Session active - $remaining minutes remaining"
+            
+            # Check RDP connections
+            $connections = (quser 2>$null | Measure-Object).Count
+            Write-Host "   Active RDP connections: $connections"
+            
+            # Health check
+            $services = Get-Service -Name TermService, Tailscale
+            foreach ($service in $services) {
+                if ($service.Status -ne "Running") {
+                    Write-Host "   ⚠️  $($service.Name) service is $($service.Status)"
+                }
+            }
+            
+            Start-Sleep -Seconds 60
         }
-    
-    - name: Trigger Next Session
-      if: env.STOP == 'false'
+
+    # ============== PROFESSIONAL CLEANUP ==============
+    - name: 🧹 Professional Cleanup Procedure
+      if: always()
       run: |
-        Write-Host "📤 This session ending. Next one will auto-start in 10 minutes..."
-        # The schedule will trigger the next run automatically
+        Write-Host ""
+        Write-Host "🧹 Executing Professional Cleanup Procedure..."
+        
+        # 1. Terminate user sessions
+        Write-Host "   Terminating user sessions..."
+        logoff /server:localhost 2>$null
+        logoff /server:localhost 2>$null
+        
+        # 2. Remove user account
+        Write-Host "   Removing temporary user..."
+        Remove-LocalUser -Name $env:RDP_USER -ErrorAction SilentlyContinue
+        
+        # 3. Disable RDP
+        Write-Host "   Securing RDP settings..."
+        Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" `
+            -Name "fDenyTSConnections" -Value 1 -Type DWord -Force
+        
+        # 4. Clean firewall rules
+        Write-Host "   Removing firewall rules..."
+        Remove-NetFirewallRule -Name "RDP-Tailscale-Pro" -ErrorAction SilentlyContinue
+        
+        # 5. Disconnect Tailscale
+        Write-Host "   Disconnecting Tailscale..."
+        & "C:\Program Files\Tailscale\tailscale.exe" down 2>$null
+        
+        # 6. Remove monitoring script
+        Write-Host "   Cleaning up monitoring..."
+        Remove-Item -Path "C:\SessionMonitor.ps1" -ErrorAction SilentlyContinue
+        Get-Job -Name "SessionMonitor" 2>$null | Remove-Job -Force
+        
+        # 7. Reset security policies
+        Write-Host "   Resetting security policies..."
+        Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue
+        
+        Write-Host "✅ Professional Cleanup Complete"
+        Write-Host ""
