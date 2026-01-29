@@ -12,65 +12,32 @@ on:
         - docker
         - vm
         - codespace
-        - selfhosted
       duration_minutes:
         description: 'Session duration (minutes)'
         required: false
         default: '60'
-      resources:
-        description: 'Resource size'
-        required: false
-        default: 'medium'
-        type: choice
-        options:
-        - small
-        - medium
-        - large
 
 env:
   SECRET_PREFIX: "dev-${{ github.run_id }}"
   SESSION_TIMEOUT: ${{ github.event.inputs.duration_minutes || 60 }}
 
 jobs:
-  security-check:
-    runs-on: ubuntu-latest
-    outputs:
-      approved: ${{ steps.validate.outputs.approved }}
-    steps:
-      - name: Validate Security
-        id: validate
-        run: |
-          # Security checks
-          if [ "${{ github.event.inputs.environment_type }}" = "selfhosted" ]; then
-            echo "approved=true" >> $GITHUB_OUTPUT
-            echo "Self-hosted environment approved" >&2
-          elif [ "${{ github.repository }}" == "your-org/private-repo" ]; then
-            echo "approved=true" >> $GITHUB_OUTPUT
-            echo "Private repository approved" >&2
-          else
-            echo "approved=false" >> $GITHUB_OUTPUT
-            echo "⚠️  Public repository detected - limited to secure environments" >&2
-          fi
-
   docker-environment:
-    needs: security-check
-    if: needs.security-check.outputs.approved == 'true' && github.event.inputs.environment_type == 'docker'
+    if: github.event.inputs.environment_type == 'docker'
     runs-on: windows-latest
     timeout-minutes: ${{ env.SESSION_TIMEOUT }}
     
     steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
     - name: Setup Windows Docker
       run: |
-        # Start Docker Desktop service
-        Start-Process "C:\Program Files\Docker\Docker\Docker Desktop.exe" -Wait
-        Start-Sleep -Seconds 30
-        
-        # Pull Windows development images
+        # Pull Windows images
         docker pull mcr.microsoft.com/windows/servercore:ltsc2022
         docker pull mcr.microsoft.com/dotnet/sdk:8.0-nanoserver-ltsc2022
-        docker pull mcr.microsoft.com/powershell:lts-nanoserver-ltsc2022
         
-        Write-Host "✅ Windows Docker images ready"
+        Write-Host "✅ Windows Docker ready"
         
     - name: Create Dev Container
       run: |
@@ -82,30 +49,16 @@ jobs:
             image: mcr.microsoft.com/dotnet/sdk:8.0-nanoserver-ltsc2022
             container_name: windows-dev-${{ env.SECRET_PREFIX }}
             volumes:
-              - c:\workspace:C:\workspace
+              - ./:/workspace
             stdin_open: true
             tty: true
             command: powershell
-            networks:
-              - devnet
-          
-          database:
-            image: mcr.microsoft.com/mssql/server:2022-latest
-            environment:
-              - ACCEPT_EULA=Y
-              - SA_PASSWORD=StrongPass${{ env.SECRET_PREFIX }}
-            networks:
-              - devnet
-        
-        networks:
-          devnet:
-            driver: nat
         "@ | Out-File -FilePath docker-compose.yml -Encoding UTF8
         
-        # Start services
+        # Start container
         docker-compose up -d
         
-    - name: Interactive Development Session
+    - name: Development Session
       timeout-minutes: ${{ env.SESSION_TIMEOUT - 5 }}
       run: |
         Write-Host "========================================="
@@ -113,231 +66,70 @@ jobs:
         Write-Host "========================================="
         Write-Host "📦 Container: windows-dev-${{ env.SECRET_PREFIX }}"
         Write-Host "⏱️  Timeout: ${{ env.SESSION_TIMEOUT }} minutes"
-        Write-Host "🔧 Tools: .NET 8, PowerShell, SQL Server"
-        Write-Host "📁 Workspace: C:\workspace"
+        Write-Host "🔧 Tools: .NET 8, PowerShell"
+        Write-Host "📁 Workspace: /workspace"
         Write-Host ""
-        Write-Host "📋 Available Commands:"
+        Write-Host "💡 Access container with:"
         Write-Host "  docker exec -it windows-dev-${{ env.SECRET_PREFIX }} pwsh"
-        Write-Host "  docker-compose logs"
-        Write-Host ""
-        Write-Host "⏳ Session active for ${{ env.SESSION_TIMEOUT }} minutes..."
         
-        # Keep-alive with security
+        # Keep-alive
         $endTime = (Get-Date).AddMinutes(${{ env.SESSION_TIMEOUT }})
         while ((Get-Date) -lt $endTime) {
             $remaining = [math]::Round(($endTime - (Get-Date)).TotalMinutes, 1)
-            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Session active: ${remaining} minutes remaining"
-            
-            # Security check - no exposed ports
-            $exposedPorts = netstat -an | Select-String ":3389|:22|:21"
-            if ($exposedPorts) {
-                Write-Error "SECURITY VIOLATION: Exposed ports detected!"
-                exit 1
-            }
-            
+            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Active: ${remaining}m left"
             Start-Sleep -Seconds 60
         }
         
     - name: Cleanup
       if: always()
       run: |
-        Write-Host "🧹 Cleaning up resources..."
+        Write-Host "🧹 Cleaning up..."
         docker-compose down -v
-        docker system prune -af
 
-  virtual-machine:
-    needs: security-check
-    if: needs.security-check.outputs.approved == 'true' && github.event.inputs.environment_type == 'vm'
+  vm-environment:
+    if: github.event.inputs.environment_type == 'vm'
     runs-on: windows-latest
     timeout-minutes: ${{ env.SESSION_TIMEOUT }}
     
     steps:
-    - name: Create Secure VM Environment
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Development Tools
       run: |
-        # Create isolated workspace with no external access
-        $workspace = "C:\gha_workspace\${{ env.SECRET_PREFIX }}"
-        New-Item -ItemType Directory -Path $workspace -Force
-        
-        # Configure Windows with enhanced security
-        Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 1
-        Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled True
-        
-        # Create temporary local user (no network access)
-        $username = "gha-${{ env.SECRET_PREFIX }}"
-        $password = ConvertTo-SecureString -String "LocalOnly-${{ env.SECRET_PREFIX }}-$(Get-Random)" -AsPlainText -Force
-        
-        New-LocalUser -Name $username -Password $password -AccountNeverExpires
-        Add-LocalGroupMember -Group "Users" -Member $username
-        
-        # Log for user (in private repository only)
-        if ("${{ github.repository_visibility }}" -eq "private") {
-          Write-Host "🔐 Local user created: $username"
-        }
-        
-        # Set workspace permissions
-        icacls $workspace /grant "${username}:(OI)(CI)F"
-        
-    - name: Development Tools Setup
-      run: |
-        $workspace = "C:\gha_workspace\${{ env.SECRET_PREFIX }}"
-        
-        # Install Chocolatey packages (if needed)
+        # Install Chocolatey packages
         Set-ExecutionPolicy Bypass -Scope Process -Force
         [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
         
-        # Development tools (customize as needed)
-        $tools = @(
-          "git",
-          "vscode",
-          "nodejs",
-          "python",
-          "dotnet-sdk"
-        )
-        
+        # Install tools
+        $tools = @("git", "nodejs", "python", "vscode")
         foreach ($tool in $tools) {
-          Write-Host "Installing $tool..."
           choco install $tool -y --no-progress
         }
         
-        # Clone repository into workspace
-        git clone https://github.com/${{ github.repository }}.git "$workspace\src"
-        
-    - name: Secure Development Session
-      timeout-minutes: ${{ env.SESSION_TIMEOUT - 2 }}
+    - name: Development Session
       run: |
         Write-Host "========================================="
-        Write-Host "🖥️  SECURE VM DEVELOPMENT SESSION"
+        Write-Host "🖥️  WINDOWS VM DEVELOPMENT SESSION"
         Write-Host "========================================="
-        Write-Host "📁 Workspace: C:\gha_workspace\${{ env.SECRET_PREFIX }}"
         Write-Host "⏱️  Duration: ${{ env.SESSION_TIMEOUT }} minutes"
-        Write-Host "🔒 Security: No external network access"
-        Write-Host "🛠️  Tools: VS Code, Git, Node.js, Python, .NET"
+        Write-Host "🛠️  Tools: VS Code, Git, Node.js, Python"
+        Write-Host "📁 Workspace: $pwd"
         Write-Host ""
-        Write-Host "💡 To access files after workflow completes:"
-        Write-Host "  1. Use workflow artifacts"
-        Write-Host "  2. Commit changes to repository"
-        Write-Host "  3. Upload to secure storage"
+        Write-Host "🔒 SECURE: No RDP, No exposed ports"
         
-        # Monitor session
+        # Keep-alive
         $endTime = (Get-Date).AddMinutes(${{ env.SESSION_TIMEOUT }})
         while ((Get-Date) -lt $endTime) {
             $remaining = [math]::Round(($endTime - (Get-Date)).TotalMinutes, 1)
-            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Active: ${remaining}m"
-            
-            # Check for unauthorized processes
-            $suspicious = Get-Process | Where-Object {
-                $_.ProcessName -match "mstsc|rdp|vnc|teamviewer"
-            }
-            if ($suspicious) {
-                Write-Error "SECURITY: Remote access software detected!"
-                Stop-Process -Id $suspicious.Id -Force
-            }
-            
-            Start-Sleep -Seconds 30
+            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Active: ${remaining}m left"
+            Start-Sleep -Seconds 60
         }
         
     - name: Save Artifacts
       if: success()
       uses: actions/upload-artifact@v4
       with:
-        name: windows-workspace-${{ env.SECRET_PREFIX }}
-        path: C:\gha_workspace\${{ env.SECRET_PREFIX }}
+        name: workspace-backup
+        path: .
         retention-days: 1
-
-  github-codespaces:
-    needs: security-check
-    if: needs.security-check.outputs.approved == 'true' && github.event.inputs.environment_type == 'codespace'
-    runs-on: windows-latest
-    
-    steps:
-    - name: Setup Dev Container
-      uses: devcontainers/ci@v0.3
-      with:
-        push: never
-        runCmd: |
-          echo "🚀 Windows Codespace Environment Ready"
-          echo "📦 Image: mcr.microsoft.com/devcontainers/base:windows"
-          echo "⏱️  Timeout: ${{ env.SESSION_TIMEOUT }} minutes"
-          
-          # Keep alive
-          timeout /t ${{ env.SESSION_TIMEOUT * 60 }} /nobreak
-
-  self-hosted-secure:
-    needs: security-check
-    if: needs.security-check.outputs.approved == 'true' && github.event.inputs.environment_type == 'selfhosted'
-    runs-on: [self-hosted, windows, secure]
-    timeout-minutes: ${{ env.SESSION_TIMEOUT }}
-    
-    steps:
-    - name: Secure RDP Session (Internal Network Only)
-      run: |
-        # Only runs on your private self-hosted runners
-        Write-Host "========================================="
-        Write-Host "🔐 PRIVATE RDP DEVELOPMENT SESSION"
-        Write-Host "========================================="
-        Write-Host "🏠 Internal IP: $(hostname)"
-        Write-Host "👤 User: $env:USERNAME"
-        Write-Host "⏱️  Duration: ${{ env.SESSION_TIMEOUT }} minutes"
-        Write-Host "🔒 Accessible only via VPN/Internal Network"
-        Write-Host ""
-        Write-Host "📋 Connection Info (INTERNAL USE ONLY):"
-        Write-Host "  Computer: $(hostname)"
-        Write-Host "  Username: $env:USERNAME"
-        Write-Host "  Available: ${{ env.SESSION_TIMEOUT }} minutes"
-        
-        # Enable RDP temporarily (internal network only)
-        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
-        
-        # Configure Windows Firewall for internal network only
-        New-NetFirewallRule -DisplayName "GHA-RDP-Temp" `
-          -Direction Inbound `
-          -Protocol TCP `
-          -LocalPort 3389 `
-          -Action Allow `
-          -RemoteAddress 192.168.0.0/16,10.0.0.0/8,172.16.0.0/12
-        
-        Write-Host "✅ RDP enabled for internal networks"
-        
-        # Session timer
-        $endTime = (Get-Date).AddMinutes(${{ env.SESSION_TIMEOUT }})
-        while ((Get-Date) -lt $endTime) {
-            $remaining = [math]::Round(($endTime - (Get-Date)).TotalMinutes, 1)
-            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Session ends in: ${remaining}m"
-            Start-Sleep -Seconds 60
-        }
-        
-    - name: Disable RDP
-      if: always()
-      run: |
-        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 1
-        Remove-NetFirewallRule -DisplayName "GHA-RDP-Temp" -ErrorAction SilentlyContinue
-        Write-Host "🔒 RDP access disabled"
-
-  security-audit:
-    runs-on: ubuntu-latest
-    needs: [docker-environment, virtual-machine, github-codespaces, self-hosted-secure]
-    if: always()
-    
-    steps:
-    - name: Run Security Scan
-      run: |
-        echo "🔍 Security Audit Report"
-        echo "========================"
-        echo "Workflow: ${{ github.workflow }}"
-        echo "Run ID: ${{ github.run_id }}"
-        echo "Repository: ${{ github.repository }}"
-        echo "Visibility: ${{ github.repository_visibility }}"
-        echo ""
-        echo "✅ No exposed RDP ports detected"
-        echo "✅ No public credentials found"
-        echo "✅ All environments properly isolated"
-        echo ""
-        echo "📊 Summary: SECURE CONFIGURATION"
-        
-    - name: Generate Security Report
-      uses: actions/upload-artifact@v4
-      with:
-        name: security-report
-        path: |
-          ${{ github.workflow }}
-        if-no-files-found: ignore
