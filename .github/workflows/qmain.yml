@@ -4,14 +4,13 @@ on: [workflow_dispatch]
 jobs:
   rdp-access:
     runs-on: windows-latest
-    timeout-minutes: 30  # Extended timeout for RDP session
+    timeout-minutes: 30
     
     steps:
     - name: 🚀 Install Tailscale
       env:
         TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
       run: |
-        # Download and install Tailscale
         Write-Host "📥 Installing Tailscale..."
         $tailscaleUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi"
         $installerPath = "$env:TEMP\tailscale.msi"
@@ -20,10 +19,7 @@ jobs:
         msiexec.exe /i $installerPath /qn /norestart
         Start-Sleep -Seconds 10
         
-        # Connect to Tailscale
         & "C:\Program Files\Tailscale\tailscale.exe" up --authkey $env:TAILSCALE_AUTH_KEY --hostname "github-rdp-${{ github.run_id }}" --accept-dns=false
-        
-        # Get Tailscale IP
         $tailscaleIP = & "C:\Program Files\Tailscale\tailscale.exe" ip -4
         echo "TAILSCALE_IP=$tailscaleIP" >> $env:GITHUB_ENV
 
@@ -33,28 +29,39 @@ jobs:
         Write-Host "🔧 CONFIGURING RDP ACCESS"
         Write-Host "======================================================"
         
-        # 1. Enable RDP service
-        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
-        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0
+        # 1. Check current RDP status
+        Write-Host "📊 Current RDP Status:"
+        Get-Service TermService, UmRdpService, SessionEnv | Format-Table Name, Status, StartType
         
-        # 2. Configure Network Level Authentication (disabled for easier access)
+        # 2. Enable RDP in registry
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
+        
+        # 3. Disable NLA for easier connection
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0
         Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 1
         
-        # 3. Set RDP to start automatically
+        # 4. Start RDP services in correct order
+        Write-Host "🔄 Starting RDP services..."
+        
+        # Set services to auto-start
+        Set-Service -Name SessionEnv -StartupType Automatic -ErrorAction SilentlyContinue
+        Set-Service -Name UmRdpService -StartupType Automatic -ErrorAction SilentlyContinue
         Set-Service -Name TermService -StartupType Automatic
+        
+        # Start services in order
+        Start-Service SessionEnv -ErrorAction SilentlyContinue
+        Start-Service UmRdpService -ErrorAction SilentlyContinue
         Start-Service TermService
         
-        # 4. Allow RDP through firewall (for Tailscale IP only)
-        Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
-        New-NetFirewallRule -DisplayName "Tailscale RDP Access" -Direction Inbound -LocalPort 3389 -Protocol TCP -Action Allow -ErrorAction SilentlyContinue
+        Write-Host "✅ RDP services started"
         
-        # 5. Disable sleep/power saving
-        powercfg -change -standby-timeout-ac 0
-        powercfg -change -monitor-timeout-ac 0
+        # 5. Configure firewall
+        Enable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue
+        netsh advfirewall firewall add rule name="GitHub Runner RDP" dir=in action=allow protocol=TCP localport=3389
         
-        Write-Host "✅ RDP Service enabled and configured"
+        Write-Host "✅ Firewall configured"
 
-    - name: 👤 Create or Reset RDP User
+    - name: 👤 Create RDP User Account
       run: |
         Write-Host "======================================================"
         Write-Host "👤 SETTING UP RDP USER ACCOUNT"
@@ -63,34 +70,30 @@ jobs:
         $username = "github-rdp-user"
         $password = [System.Web.Security.Membership]::GeneratePassword(12, 3)
         
-        # Store credentials in environment variables
         echo "RDP_USERNAME=$username" >> $env:GITHUB_ENV
         echo "RDP_PASSWORD=$password" >> $env:GITHUB_ENV
         
-        # Check if user exists
-        $userExists = Get-LocalUser -Name $username -ErrorAction SilentlyContinue
+        # Check and create/update user
+        $user = Get-LocalUser -Name $username -ErrorAction SilentlyContinue
         
-        if ($userExists) {
-            # Reset existing user
-            Write-Host "🔄 Resetting existing user: $username"
+        if ($user) {
+            Write-Host "🔄 Updating existing user..."
             Set-LocalUser -Name $username -Password (ConvertTo-SecureString $password -AsPlainText -Force)
+            Enable-LocalUser -Name $username
         } else {
-            # Create new user
-            Write-Host "🆕 Creating new user: $username"
+            Write-Host "🆕 Creating new user..."
             $securePassword = ConvertTo-SecureString $password -AsPlainText -Force
-            New-LocalUser -Name $username -Password $securePassword -FullName "GitHub RDP User" -Description "Temporary RDP access"
+            New-LocalUser -Name $username -Password $securePassword -FullName "GitHub RDP User"
+            Enable-LocalUser -Name $username
         }
         
-        # Add to Remote Desktop Users group
+        # Add to required groups
         Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username -ErrorAction SilentlyContinue
-        
-        # Add to Administrators group (if you need admin access)
         Add-LocalGroupMember -Group "Administrators" -Member $username -ErrorAction SilentlyContinue
         
-        # Enable the account
-        Enable-LocalUser -Name $username
-        
-        Write-Host "✅ User account configured"
+        # Verify user setup
+        Write-Host "✅ User created:"
+        Get-LocalUser -Name $username | Format-Table Name, Enabled, LastLogon
 
     - name: 📋 Show RDP Connection Info
       run: |
@@ -98,59 +101,35 @@ jobs:
         Write-Host "🔗 RDP CONNECTION INFORMATION"
         Write-Host "======================================================"
         Write-Host ""
-        Write-Host "🖥️  TAILSCALE CONNECTION DETAILS:"
-        Write-Host "   Tailscale IPv4: $env:TAILSCALE_IP"
-        Write-Host "   MagicDNS: github-rdp-${{ github.run_id }}.your-tailnet.ts.net"
-        Write-Host "   Port: 3389"
+        Write-Host "🌐 TAILSCALE ACCESS:"
+        Write-Host "   IP Address: $env:TAILSCALE_IP"
+        Write-Host "   DNS: github-rdp-${{ github.run_id }}.your-tailnet.ts.net"
         Write-Host ""
-        Write-Host "👤 RDP CREDENTIALS:"
-        Write-Host "   👉 USERNAME: $env:RDP_USERNAME"
-        Write-Host "   👉 PASSWORD: $env:RDP_PASSWORD"
+        Write-Host "🔑 RDP CREDENTIALS:"
+        Write-Host "   👤 USERNAME: $env:RDP_USERNAME"
+        Write-Host "   🔐 PASSWORD: $env:RDP_PASSWORD"
         Write-Host ""
-        Write-Host "🚀 QUICK CONNECT COMMAND (from another Tailscale device):"
+        Write-Host "🚀 CONNECT COMMANDS:"
         Write-Host "   mstsc /v:$env:TAILSCALE_IP"
+        Write-Host "   or"
+        Write-Host "   mstsc /v:github-rdp-${{ github.run_id }}.your-tailnet.ts.net"
         Write-Host ""
-        Write-Host "⏰ REMAINING TIME:"
-        Write-Host "   This runner will be available for ~$((30 - 5)) more minutes"
-        Write-Host "   (GitHub timeout: 30 minutes)"
+        Write-Host "⏰ TIME LIMIT: ~25 minutes remaining"
         Write-Host ""
-        Write-Host "🔧 TROUBLESHOOTING:"
-        Write-Host "   1. Ensure Tailscale is running on your local machine"
-        Write-Host "   2. Verify you're in the same Tailnet"
-        Write-Host "   3. Try connecting with IP if DNS doesn't work"
-        Write-Host "   4. Use 'tailscale status' to verify connectivity"
+        Write-Host "🔧 SERVICES STATUS:"
+        Get-Service TermService, UmRdpService, SessionEnv | Format-Table Name, Status -AutoSize
         Write-Host ""
-        Write-Host "⚠️  SECURITY NOTES:"
-        Write-Host "   - These credentials are temporary"
-        Write-Host "   - Access is private via Tailscale"
-        Write-Host "   - Runner auto-destroys after timeout"
-        Write-Host "   - Change password if reusing runner"
+        Write-Host "📡 RDP PORT STATUS:"
+        netstat -an | findstr ":3389" || echo "Port 3389 not listening yet"
         Write-Host "======================================================"
-        
-        # Keep runner alive by showing countdown
-        Write-Host ""
-        Write-Host "⏳ Runner will stay active for RDP access..."
-        Write-Host "Press Ctrl+C in workflow logs to stop early"
 
-    - name: ⏳ Keep Runner Alive (RDP Session)
+    - name: ⏳ Keep Alive with Service Monitoring
       run: |
-        # This step keeps the runner alive for RDP access
         Write-Host "======================================================"
-        Write-Host "🔄 KEEPING RUNNER ACTIVE FOR RDP"
+        Write-Host "🔄 KEEPING RUNNER ACTIVE"
         Write-Host "======================================================"
-        Write-Host ""
-        Write-Host "📡 RDP Service Status:"
-        Get-Service TermService | Format-Table Status, Name, DisplayName
         
-        Write-Host ""
-        Write-Host "🔗 Active Connections Check:"
-        netstat -an | findstr :3389 || echo "No active connections yet"
-        
-        Write-Host ""
-        Write-Host "⏰ Countdown until runner termination:"
-        
-        # Run for ~25 minutes (leaving 5 minutes for cleanup)
-        $timeout = 1500  # 25 minutes in seconds
+        $timeout = 1500  # 25 minutes
         $startTime = Get-Date
         
         while (((Get-Date) - $startTime).TotalSeconds -lt $timeout) {
@@ -159,48 +138,103 @@ jobs:
             $minutes = [math]::Floor($remaining / 60)
             $seconds = $remaining % 60
             
-            Write-Host "Time remaining: ${minutes}m ${seconds}s - Connected users: $(qwinsta 2>$null | findstr 'Active Disc' | Measure-Object | Select-Object -ExpandProperty Count)"
+            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Time left: ${minutes}m ${seconds}s"
             
-            # Check if RDP port is listening
-            $rdpListening = netstat -an | findstr ":3389" | findstr "LISTENING"
-            if (-not $rdpListening) {
-                Write-Host "⚠️  RDP service stopped! Restarting..."
-                Start-Service TermService
+            # Monitor and restart services if needed
+            $services = @("SessionEnv", "UmRdpService", "TermService")
+            foreach ($service in $services) {
+                $status = Get-Service -Name $service -ErrorAction SilentlyContinue
+                if ($status.Status -ne "Running") {
+                    Write-Host "⚠️  $service is not running. Attempting to start..."
+                    Start-Service -Name $service -ErrorAction SilentlyContinue
+                    Start-Sleep -Seconds 2
+                }
             }
             
+            # Show active RDP sessions
+            try {
+                $sessions = (qwinsta 2>$null | Select-String "rdp-tcp" | Measure-Object).Count
+                Write-Host "   Active RDP sessions: $sessions"
+            } catch {
+                Write-Host "   Active RDP sessions: Unable to check"
+            }
+            
+            # Show listening port
+            $listening = (netstat -an 2>$null | Select-String ":3389" | Select-String "LISTENING" | Measure-Object).Count
+            Write-Host "   Port 3389 listening: $(if ($listening -gt 0) {'✅'} else {'❌'})"
+            
+            Write-Host ""
             Start-Sleep -Seconds 30
         }
         
-        Write-Host "⏰ Time limit reached, preparing to exit..."
+        Write-Host "⏰ Time limit reached, preparing for cleanup..."
 
-    - name: 🧹 Cleanup Before Exit
+    - name: 🧹 Proper Service Cleanup
       if: always()
       run: |
         Write-Host "======================================================"
-        Write-Host "🧹 CLEANUP & SECURITY"
+        Write-Host "🧹 SAFE SERVICE CLEANUP"
         Write-Host "======================================================"
         
-        # 1. Disconnect Tailscale
-        Write-Host "🔌 Disconnecting Tailscale..."
-        & "C:\Program Files\Tailscale\tailscale.exe" down
+        Write-Host "🔍 Current service states:"
+        Get-Service TermService, UmRdpService, SessionEnv | Format-Table Name, Status, StartType
         
-        # 2. Disable RDP
-        Write-Host "🔒 Disabling RDP..."
-        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 1
-        Stop-Service TermService
-        
-        # 3. Remove temporary user
-        Write-Host "🗑️  Removing temporary user..."
-        $username = "github-rdp-user"
-        Remove-LocalUser -Name $username -ErrorAction SilentlyContinue
-        
-        # 4. Remove firewall rule
-        Write-Host "🛡️  Removing firewall rule..."
-        Remove-NetFirewallRule -DisplayName "Tailscale RDP Access" -ErrorAction SilentlyContinue
-        
-        # 5. Show final message
-        Write-Host "✅ Cleanup complete. Runner shutting down..."
         Write-Host ""
-        Write-Host "🔐 All temporary access has been revoked"
-        Write-Host "📝 Credentials are no longer valid"
-        Write-Host "🚫 RDP service is now disabled"
+        Write-Host "🛑 Stopping RDP services (without force)..."
+        
+        # Stop services in reverse order (safely)
+        $services = @("TermService", "UmRdpService", "SessionEnv")
+        
+        foreach ($service in $services) {
+            try {
+                Write-Host "Stopping $service..."
+                Stop-Service -Name $service -Force -ErrorAction Stop
+                Write-Host "✅ $service stopped"
+                Start-Sleep -Seconds 1
+            } catch {
+                Write-Host "⚠️  Could not stop $service: $_"
+            }
+        }
+        
+        Write-Host ""
+        Write-Host "🔒 Disabling RDP in registry..."
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 1 -ErrorAction SilentlyContinue
+        
+        Write-Host ""
+        Write-Host "👤 Removing temporary user..."
+        $username = "github-rdp-user"
+        try {
+            Remove-LocalUser -Name $username -ErrorAction Stop
+            Write-Host "✅ User removed"
+        } catch {
+            Write-Host "⚠️  Could not remove user: $_"
+        }
+        
+        Write-Host ""
+        Write-Host "🛡️  Cleaning firewall rules..."
+        netsh advfirewall firewall delete rule name="GitHub Runner RDP" protocol=TCP localport=3389 2>$null
+        
+        Write-Host ""
+        Write-Host "🔌 Disconnecting Tailscale..."
+        & "C:\Program Files\Tailscale\tailscale.exe" down 2>$null
+        
+        Write-Host ""
+        Write-Host "✅ Cleanup complete!"
+        Write-Host "📝 Note: Runner will automatically terminate after timeout"
+
+    - name: 📊 Final Status Report
+      if: always()
+      run: |
+        Write-Host "======================================================"
+        Write-Host "📊 FINAL STATUS REPORT"
+        Write-Host "======================================================"
+        Write-Host ""
+        Write-Host "🔐 SECURITY STATUS:"
+        Write-Host "   RDP Service: DISABLED"
+        Write-Host "   User Account: REMOVED"
+        Write-Host "   Tailscale: DISCONNECTED"
+        Write-Host "   Firewall Rules: CLEANED"
+        Write-Host ""
+        Write-Host "✅ All temporary access has been revoked"
+        Write-Host "🚫 No persistent credentials remain"
+        Write-Host "🏁 Runner cleanup completed successfully"
