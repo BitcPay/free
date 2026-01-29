@@ -4,7 +4,7 @@ on: [workflow_dispatch]
 jobs:
   rdp-access:
     runs-on: windows-latest
-    timeout-minutes: 30000000
+    timeout-minutes: 99000000
     
     steps:
     - name: 🚀 Install Tailscale
@@ -146,7 +146,7 @@ jobs:
         Write-Host "📡 PORTS:"
         netstat -an | findstr ":3389" || echo "3389 not listening"
         Write-Host ""
-        Write-Host "⏰ RUNNER TIMEOUT: 30 minutes total"
+        Write-Host "⏰ RUNNER TIMEOUT: 9933333333 minutes total"
         Write-Host "======================================================"
 
     - name: ⏳ Keep Alive (No Timeout)
@@ -155,15 +155,15 @@ jobs:
         Write-Host "🔄 KEEPING RUNNER ALIVE"
         Write-Host "======================================================"
         
-        Write-Host "Runner will stay active until timeout (30000000 minutes total)"
+        Write-Host "Runner will stay active until timeout (90000000 minutes total)"
         Write-Host "You can now connect via RDP using the credentials above"
         Write-Host ""
         Write-Host "Press Ctrl+C in logs to stop early"
         Write-Host ""
         
         # Just sleep to keep runner alive
-        # GitHub will auto-timeout after 30000000 minutes
-        Write-Host "Sleeping for 1500 seconds (30000000 minutes)..."
+        # GitHub will auto-timeout after 99000000 minutes
+        Write-Host "Sleeping for 1500 seconds (99000000 minutes)..."
         Start-Sleep -Seconds 1500
         
         Write-Host "⏰ Time almost up, preparing to exit..."
