@@ -1,0 +1,23 @@
+- name: Debug RDP Status
+  run: |
+    Write-Host "=== RDP STATUS CHECK ==="
+    
+    # Check RDP service
+    $service = Get-Service TermService
+    Write-Host "RDP Service: $($service.Status)"
+    
+    # Check registry settings
+    $rdpEnabled = Get-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -ErrorAction SilentlyContinue
+    Write-Host "RDP Enabled: $(if ($rdpEnabled.fDenyTSConnections -eq 0) {'YES'} else {'NO'})"
+    
+    # Check firewall
+    $firewallRule = Get-NetFirewallRule -DisplayName "RDP-Tailscale" -ErrorAction SilentlyContinue
+    Write-Host "Firewall Rule: $(if ($firewallRule) {'ACTIVE'} else {'MISSING'})"
+    
+    # Check listening ports
+    Write-Host "Port 3389 Listening:"
+    netstat -an | select-string ":3389" | select-string "LISTENING"
+    
+    # Check user
+    $user = Get-LocalUser -Name "runneradmin" -ErrorAction SilentlyContinue
+    Write-Host "runneradmin user: $(if ($user) {'EXISTS'} else {'MISSING'})"
