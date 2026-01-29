@@ -68,35 +68,78 @@ jobs:
         Write-Host "======================================================"
         
         $username = "github-rdp-user"
+        
+        # Generate random password using built-in PowerShell methods
+        # Method 1: Using .NET Cryptography
+        Add-Type -AssemblyName System.Web
         $password = [System.Web.Security.Membership]::GeneratePassword(12, 3)
+        
+        # Method 2: Alternative if Method 1 fails
+        if (-not $password -or $password.Length -lt 8) {
+            Write-Host "⚠️  Using alternative password generation..."
+            $chars = @('abcdefghijkmnpqrstuvwxyz', 'ABCDEFGHJKLMNPQRSTUVWXYZ', '23456789', '!@#$%^&*')
+            $password = -join ((1..12) | ForEach-Object {
+                $charSet = $chars[(Get-Random -Minimum 0 -Maximum $chars.Count)]
+                $charSet[(Get-Random -Minimum 0 -Maximum $charSet.Length)]
+            })
+        }
         
         echo "RDP_USERNAME=$username" >> $env:GITHUB_ENV
         echo "RDP_PASSWORD=$password" >> $env:GITHUB_ENV
+        
+        Write-Host "Generated password length: $($password.Length)"
         
         # Check and create/update user
         $user = Get-LocalUser -Name $username -ErrorAction SilentlyContinue
         
         if ($user) {
             Write-Host "🔄 Updating existing user..."
-            Set-LocalUser -Name $username -Password (ConvertTo-SecureString $password -AsPlainText -Force)
-            Enable-LocalUser -Name $username
+            try {
+                $securePassword = ConvertTo-SecureString $password -AsPlainText -Force
+                Set-LocalUser -Name $username -Password $securePassword
+                Enable-LocalUser -Name $username
+                Write-Host "✅ User updated"
+            } catch {
+                Write-Host "❌ Error updating user: $_"
+                # Try alternative method
+                net user $username $password 2>$null
+            }
         } else {
             Write-Host "🆕 Creating new user..."
-            $securePassword = ConvertTo-SecureString $password -AsPlainText -Force
-            New-LocalUser -Name $username -Password $securePassword -FullName "GitHub RDP User"
-            Enable-LocalUser -Name $username
+            try {
+                $securePassword = ConvertTo-SecureString $password -AsPlainText -Force
+                New-LocalUser -Name $username -Password $securePassword -FullName "GitHub RDP User"
+                Enable-LocalUser -Name $username
+                Write-Host "✅ User created"
+            } catch {
+                Write-Host "❌ Error creating user: $_"
+                # Try using net command as fallback
+                net user $username $password /add /fullname:"GitHub RDP User" /y 2>$null
+                net user $username /active:yes 2>$null
+            }
         }
         
-        # Add to required groups
-        Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username -ErrorAction SilentlyContinue
-        Add-LocalGroupMember -Group "Administrators" -Member $username -ErrorAction SilentlyContinue
+        # Add to required groups using multiple methods
+        Write-Host "👥 Adding user to groups..."
+        
+        # Method 1: PowerShell
+        try {
+            Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username -ErrorAction SilentlyContinue
+            Add-LocalGroupMember -Group "Administrators" -Member $username -ErrorAction SilentlyContinue
+        } catch {
+            # Method 2: net command
+            net localgroup "Remote Desktop Users" $username /add 2>$null
+            net localgroup "Administrators" $username /add 2>$null
+        }
         
         # Verify user setup
-        Write-Host "✅ User created:"
-        Get-LocalUser -Name $username | Format-Table Name, Enabled, LastLogon
+        Write-Host ""
+        Write-Host "✅ User verification:"
+        Get-LocalUser -Name $username -ErrorAction SilentlyContinue | Format-Table Name, Enabled -AutoSize
 
     - name: 📋 Show RDP Connection Info
       run: |
+        Write-Host ""
         Write-Host "======================================================"
         Write-Host "🔗 RDP CONNECTION INFORMATION"
         Write-Host "======================================================"
@@ -110,23 +153,37 @@ jobs:
         Write-Host "   🔐 PASSWORD: $env:RDP_PASSWORD"
         Write-Host ""
         Write-Host "🚀 CONNECT COMMANDS:"
-        Write-Host "   mstsc /v:$env:TAILSCALE_IP"
-        Write-Host "   or"
-        Write-Host "   mstsc /v:github-rdp-${{ github.run_id }}.your-tailnet.ts.net"
+        Write-Host "   Windows: mstsc /v:$env:TAILSCALE_IP"
+        Write-Host "   macOS: Use Microsoft Remote Desktop"
+        Write-Host "   Linux: xfreerdp /v:$env:TAILSCALE_IP /u:$env:RDP_USERNAME /p:$env:RDP_PASSWORD"
         Write-Host ""
         Write-Host "⏰ TIME LIMIT: ~25 minutes remaining"
         Write-Host ""
         Write-Host "🔧 SERVICES STATUS:"
         Get-Service TermService, UmRdpService, SessionEnv | Format-Table Name, Status -AutoSize
         Write-Host ""
-        Write-Host "📡 RDP PORT STATUS:"
-        netstat -an | findstr ":3389" || echo "Port 3389 not listening yet"
+        Write-Host "📡 PORT CHECK:"
+        $listening = netstat -an | findstr ":3389" | findstr "LISTENING"
+        if ($listening) {
+            Write-Host "   ✅ Port 3389 is listening"
+        } else {
+            Write-Host "   ❌ Port 3389 is NOT listening"
+            Write-Host "   Trying to restart RDP services..."
+            Start-Service TermService -ErrorAction SilentlyContinue
+        }
         Write-Host "======================================================"
+        Write-Host ""
+        Write-Host "💡 TIPS:"
+        Write-Host "   1. Make sure Tailscale is running on your local machine"
+        Write-Host "   2. Use the IP if DNS doesn't work"
+        Write-Host "   3. Disable NLA in RDP client if connection fails"
+        Write-Host "   4. Check 'tailscale status' to verify connectivity"
+        Write-Host ""
 
     - name: ⏳ Keep Alive with Service Monitoring
       run: |
         Write-Host "======================================================"
-        Write-Host "🔄 KEEPING RUNNER ACTIVE"
+        Write-Host "🔄 KEEPING RUNNER ACTIVE FOR RDP"
         Write-Host "======================================================"
         
         $timeout = 1500  # 25 minutes
@@ -138,103 +195,98 @@ jobs:
             $minutes = [math]::Floor($remaining / 60)
             $seconds = $remaining % 60
             
-            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Time left: ${minutes}m ${seconds}s"
+            Write-Host ""
+            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] ⏰ Time left: ${minutes}m ${seconds}s"
+            Write-Host "----------------------------------------"
             
-            # Monitor and restart services if needed
-            $services = @("SessionEnv", "UmRdpService", "TermService")
-            foreach ($service in $services) {
+            # Check RDP services
+            Write-Host "🔧 SERVICE STATUS:"
+            $services = @{
+                "TermService" = "Remote Desktop Services"
+                "UmRdpService" = "RDP Redirector"
+                "SessionEnv" = "Remote Desktop Configuration"
+            }
+            
+            foreach ($service in $services.Keys) {
                 $status = Get-Service -Name $service -ErrorAction SilentlyContinue
-                if ($status.Status -ne "Running") {
-                    Write-Host "⚠️  $service is not running. Attempting to start..."
-                    Start-Service -Name $service -ErrorAction SilentlyContinue
-                    Start-Sleep -Seconds 2
+                if ($status) {
+                    Write-Host "   $($services[$service]): $($status.Status)"
+                    if ($status.Status -ne "Running" -and $service -eq "TermService") {
+                        Write-Host "   ⚠️  Starting $service..."
+                        Start-Service -Name $service -ErrorAction SilentlyContinue
+                    }
+                } else {
+                    Write-Host "   $($services[$service]): ❌ Not found"
                 }
             }
             
-            # Show active RDP sessions
+            # Check active connections
+            Write-Host ""
+            Write-Host "📡 CONNECTIONS:"
             try {
-                $sessions = (qwinsta 2>$null | Select-String "rdp-tcp" | Measure-Object).Count
-                Write-Host "   Active RDP sessions: $sessions"
+                $sessionCount = (qwinsta 2>$null | Select-String "rdp-tcp" | Measure-Object).Count
+                Write-Host "   Active RDP sessions: $sessionCount"
             } catch {
-                Write-Host "   Active RDP sessions: Unable to check"
+                Write-Host "   Active RDP sessions: 0"
             }
             
-            # Show listening port
             $listening = (netstat -an 2>$null | Select-String ":3389" | Select-String "LISTENING" | Measure-Object).Count
             Write-Host "   Port 3389 listening: $(if ($listening -gt 0) {'✅'} else {'❌'})"
             
-            Write-Host ""
+            Write-Host "----------------------------------------"
             Start-Sleep -Seconds 30
         }
         
-        Write-Host "⏰ Time limit reached, preparing for cleanup..."
+        Write-Host ""
+        Write-Host "⏰ Time limit reached, starting cleanup..."
 
-    - name: 🧹 Proper Service Cleanup
+    - name: 🧹 Cleanup Before Exit
       if: always()
       run: |
         Write-Host "======================================================"
-        Write-Host "🧹 SAFE SERVICE CLEANUP"
+        Write-Host "🧹 CLEANING UP"
         Write-Host "======================================================"
         
-        Write-Host "🔍 Current service states:"
-        Get-Service TermService, UmRdpService, SessionEnv | Format-Table Name, Status, StartType
+        Write-Host "🛑 Stopping RDP services..."
         
-        Write-Host ""
-        Write-Host "🛑 Stopping RDP services (without force)..."
-        
-        # Stop services in reverse order (safely)
+        # Stop services in reverse order
         $services = @("TermService", "UmRdpService", "SessionEnv")
         
         foreach ($service in $services) {
             try {
-                Write-Host "Stopping $service..."
-                Stop-Service -Name $service -Force -ErrorAction Stop
-                Write-Host "✅ $service stopped"
-                Start-Sleep -Seconds 1
+                $svc = Get-Service -Name $service -ErrorAction SilentlyContinue
+                if ($svc -and $svc.Status -eq "Running") {
+                    Write-Host "   Stopping $service..."
+                    Stop-Service -Name $service -Force -ErrorAction SilentlyContinue
+                    Write-Host "   ✅ Stopped"
+                }
             } catch {
-                Write-Host "⚠️  Could not stop $service: $_"
+                Write-Host "   ⚠️  Could not stop $service"
             }
+            Start-Sleep -Seconds 1
         }
         
         Write-Host ""
-        Write-Host "🔒 Disabling RDP in registry..."
+        Write-Host "🔒 Disabling RDP..."
         Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 1 -ErrorAction SilentlyContinue
         
         Write-Host ""
-        Write-Host "👤 Removing temporary user..."
+        Write-Host "👤 Removing user..."
         $username = "github-rdp-user"
         try {
-            Remove-LocalUser -Name $username -ErrorAction Stop
-            Write-Host "✅ User removed"
+            Remove-LocalUser -Name $username -ErrorAction SilentlyContinue
+            Write-Host "   ✅ User removed"
         } catch {
-            Write-Host "⚠️  Could not remove user: $_"
+            Write-Host "   ⚠️  Could not remove user (may not exist)"
         }
         
         Write-Host ""
-        Write-Host "🛡️  Cleaning firewall rules..."
-        netsh advfirewall firewall delete rule name="GitHub Runner RDP" protocol=TCP localport=3389 2>$null
+        Write-Host "🛡️  Removing firewall rule..."
+        netsh advfirewall firewall delete rule name="GitHub Runner RDP" 2>$null
         
         Write-Host ""
         Write-Host "🔌 Disconnecting Tailscale..."
         & "C:\Program Files\Tailscale\tailscale.exe" down 2>$null
         
         Write-Host ""
-        Write-Host "✅ Cleanup complete!"
-        Write-Host "📝 Note: Runner will automatically terminate after timeout"
-
-    - name: 📊 Final Status Report
-      if: always()
-      run: |
-        Write-Host "======================================================"
-        Write-Host "📊 FINAL STATUS REPORT"
-        Write-Host "======================================================"
-        Write-Host ""
-        Write-Host "🔐 SECURITY STATUS:"
-        Write-Host "   RDP Service: DISABLED"
-        Write-Host "   User Account: REMOVED"
-        Write-Host "   Tailscale: DISCONNECTED"
-        Write-Host "   Firewall Rules: CLEANED"
-        Write-Host ""
-        Write-Host "✅ All temporary access has been revoked"
-        Write-Host "🚫 No persistent credentials remain"
-        Write-Host "🏁 Runner cleanup completed successfully"
+        Write-Host "✅ Cleanup completed!"
