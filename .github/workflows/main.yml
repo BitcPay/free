@@ -1,515 +1,540 @@
-name: 🪟 Windows Professional RDP with Tailscale
+name: Windows 11 Pro RDP with Tailscale
 on:
   workflow_dispatch:
     inputs:
-      session_minutes:
-        description: 'Session duration (minutes)'
+      edition:
+        description: 'Windows Edition'
         required: true
-        default: '120'
+        default: 'Pro'
         type: choice
         options:
-        - '60'
-        - '120'
-        - '180'
-        - '240'
-      use_ssl:
-        description: 'Enable SSL/TLS for RDP?'
+        - 'Pro'
+        - 'Enterprise'
+      optimization:
+        description: 'Performance Profile'
         required: true
-        default: 'true'
-        type: boolean
+        default: 'Development'
+        type: choice
+        options:
+        - 'Development'
+        - 'Gaming'
+        - 'Server'
 
 env:
+  WINDOWS_EDITION: ${{ github.event.inputs.edition }}
+  OPTIMIZATION_PROFILE: ${{ github.event.inputs.optimization }}
   RDP_PORT: 3389
-  TAILSCALE_EXIT_NODE: false
-  SESSION_TIMEOUT: ${{ github.event.inputs.session_minutes }}
+  SESSION_TIMEOUT: 180
 
 jobs:
-  windows-rdp-pro:
-    name: 🖥️ Windows Professional RDP Session
+  windows11-pro-rdp:
     runs-on: windows-latest
     timeout-minutes: ${{ env.SESSION_TIMEOUT }}
     
     steps:
-    # ============== SECURITY SETUP ==============
-    - name: 🔐 Generate Secure Credentials
-      id: credentials
+    # ============== WINDOWS 11 PRO INITIALIZATION ==============
+    - name: 🪟 Configure Windows 11 Pro Settings
       run: |
-        # Generate cryptographically secure credentials
-        Add-Type -AssemblyName System.Security
-        function Generate-SecureString {
-            param([int]$Length = 24)
-            $charSet = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*'
-            $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
-            $bytes = New-Object byte[] $Length
-            $rng.GetBytes($bytes)
-            $result = ''
-            foreach ($byte in $bytes) {
-                $result += $charSet[$byte % $charSet.Length]
-            }
-            return $result
+        Write-Host "🪟 Configuring Windows 11 Professional..."
+        
+        # Enable Windows 11 Pro features
+        if ($env:WINDOWS_EDITION -eq "Pro" -or $env:WINDOWS_EDITION -eq "Enterprise") {
+            # Enable Hyper-V for Pro/Enterprise
+            Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V -All -NoRestart
+            Enable-WindowsOptionalFeature -Online -FeatureName Containers -All -NoRestart
+            
+            # Enable Windows Sandbox (Pro/Enterprise only)
+            Enable-WindowsOptionalFeature -Online -FeatureName "Containers-DisposableClientVM" -All -NoRestart
         }
         
-        $username = "gh-$(Get-Random -Minimum 1000 -Maximum 9999)"
-        $password = Generate-SecureString -Length 20
-        $sessionId = "session-$(Get-Date -Format 'yyyyMMddHHmmss')"
+        # Disable Windows 11 "consumer" features
+        $consumerFeatures = @(
+            "Clipboard",
+            "WindowsMediaPlayer",
+            "XboxGipSvc",
+            "XblAuthManager",
+            "XblGameSave",
+            "XboxNetApiSvc"
+        )
         
-        # Mask sensitive values from logs
+        foreach ($feature in $consumerFeatures) {
+            Get-WindowsCapability -Online -Name "*$feature*" | Remove-WindowsCapability -Online -ErrorAction SilentlyContinue
+        }
+
+    # ============== SECURITY & CREDENTIALS ==============
+    - name: 🔐 Generate Professional Credentials
+      id: credentials
+      run: |
+        # Windows 11 compatible secure password generation
+        function Generate-Windows11Password {
+            param([int]$Length = 20)
+            $charSets = @{
+                Lower = 'abcdefghijklmnopqrstuvwxyz'
+                Upper = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+                Numbers = '0123456789'
+                Special = '!@#$%^&*()-_=+[]{}|;:,.<>?'
+            }
+            
+            # Ensure password meets Windows complexity requirements
+            $password = @(
+                $charSets.Lower[(Get-Random -Minimum 0 -Maximum $charSets.Lower.Length)]
+                $charSets.Upper[(Get-Random -Minimum 0 -Maximum $charSets.Upper.Length)]
+                $charSets.Numbers[(Get-Random -Minimum 0 -Maximum $charSets.Numbers.Length)]
+                $charSets.Special[(Get-Random -Minimum 0 -Maximum $charSets.Special.Length)]
+            )
+            
+            # Fill remaining characters
+            $allChars = $charSets.Lower + $charSets.Upper + $charSets.Numbers + $charSets.Special
+            for ($i = $password.Length; $i -lt $Length; $i++) {
+                $password += $allChars[(Get-Random -Minimum 0 -Maximum $allChars.Length)]
+            }
+            
+            # Shuffle the password
+            $password = -join ($password | Get-Random -Count $password.Length)
+            return $password
+        }
+        
+        $username = "Win11-$(Get-Random -Minimum 10000 -Maximum 99999)"
+        $password = Generate-Windows11Password -Length 18
+        $computerName = "GH-WIN11-$((Get-Date).ToString('yyMMddHHmm'))"
+        
         echo "::add-mask::$password"
         echo "::add-mask::$username"
         
-        # Store in environment
-        echo "RDP_USER=$username" >> $env:GITHUB_ENV
-        echo "RDP_PASS=$password" >> $env:GITHUB_ENV
-        echo "SESSION_ID=$sessionId" >> $env:GITHUB_ENV
+        echo "WIN11_USER=$username" >> $env:GITHUB_ENV
+        echo "WIN11_PASS=$password" >> $env:GITHUB_ENV
+        echo "WIN11_HOSTNAME=$computerName" >> $env:GITHUB_ENV
         
-        Write-Host "✅ Generated secure credentials"
-        Write-Host "Session ID: $sessionId"
-        Write-Host "Username: ********"
-        Write-Host "Password: ********"
+        # Rename computer (requires admin)
+        Rename-Computer -NewName $computerName -Force -ErrorAction SilentlyContinue
 
-    # ============== TAILSCALE VPN ==============
-    - name: 🛡️ Setup Tailscale Zero-Trust Network
+    # ============== TAILSCALE SETUP ==============
+    - name: 🛡️ Install Tailscale VPN
       env:
-        TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_PRO_AUTH_KEY }}
-        TAILSCALE_TAGS: "tag:github-runner,tag:rdp-session"
+        TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
       run: |
-        Write-Host "🔒 Setting up Tailscale Zero-Trust Network..."
+        Write-Host "🔒 Installing Tailscale for Windows 11..."
         
-        # Install Tailscale
-        $installer = "$env:TEMP\tailscale-pro.msi"
-        $tsLatest = "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi"
+        # Download latest Tailscale
+        $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi"
+        $installerPath = "$env:TEMP\tailscale-win11.msi"
         
-        Invoke-WebRequest -Uri $tsLatest -OutFile $installer -Headers @{
-            'User-Agent' = 'GitHub-Actions-Windows-RDP'
-        }
+        Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath -UserAgent "Windows11-RDP-Setup"
         
-        # Silent install with logging
-        $logFile = "$env:TEMP\tailscale-install.log"
+        # Install with Windows 11 optimizations
         $installArgs = @(
-            "/i", "`"$installer`"",
+            "/i", "`"$installerPath`"",
             "/qn",
             "/norestart",
-            "/L*v", "`"$logFile`"",
-            "ACCEPTMULA=1"
+            "ALLUSERS=1",
+            "SERVICESTARTTYPE=auto"
         )
         
         Start-Process "msiexec.exe" -ArgumentList $installArgs -Wait -NoNewWindow
         Start-Sleep -Seconds 10
         
-        # Configure Tailscale with enhanced security
-        $tsConfig = @{
-            "--authkey" = $env:TAILSCALE_AUTH_KEY
-            "--hostname" = "gh-win-pro-$env:SESSION_ID"
-            "--advertise-tags" = $env:TAILSCALE_TAGS
-            "--accept-routes" = "true"
-            "--accept-dns" = "true"
-            "--shields-up" = "true"
-            "--ssh" = "false"
-            "--reset" = $true
-        }
-        
-        # Convert to CLI arguments
-        $tsArgs = $tsConfig.GetEnumerator() | ForEach-Object {
-            "$($_.Key)=$($_.Value)"
-        } | Join-String -Separator " "
-        
-        & "C:\Program Files\Tailscale\tailscale.exe" up @tsArgs.Split(' ')
+        # Connect to Tailscale
+        & "$env:ProgramFiles\Tailscale\tailscale.exe" up `
+            --authkey=$env:TAILSCALE_AUTH_KEY `
+            --hostname=$env:WIN11_HOSTNAME `
+            --accept-dns=true `
+            --accept-routes=true `
+            --shields-up=false `
+            --exit-node=${{ github.event.inputs.edition == 'Enterprise' && 'true' || 'false' }}
         
         # Get connection info
-        $tsStatus = & "C:\Program Files\Tailscale\tailscale.exe" status --json | ConvertFrom-Json
-        $tsIp = & "C:\Program Files\Tailscale\tailscale.exe" ip -4
-        
-        echo "TAILSCALE_IP=$tsIp" >> $env:GITHUB_ENV
-        echo "TAILSCALE_DNS=$($tsStatus.Self.DNSName)" >> $env:GITHUB_ENV
-        
-        Write-Host "✅ Tailscale Connected"
-        Write-Host "   IP: $tsIp"
-        Write-Host "   DNS: $($tsStatus.Self.DNSName)"
-
-    # ============== WINDOWS HARDENING ==============
-    - name: ⚙️ Configure Windows Security Policies
-      run: |
-        Write-Host "🛡️ Hardening Windows Security Configuration..."
-        
-        # 1. Enable Windows Defender Real-time Protection
-        Set-MpPreference -DisableRealtimeMonitoring $false
-        Set-MpPreference -DisableBehaviorMonitoring $false
-        Set-MpPreference -DisableBlockAtFirstSeen $false
-        
-        # 2. Configure Windows Firewall with Advanced Rules
-        netsh advfirewall firewall delete rule name="RDP-Tailscale" 2>$null
-        
-        # Create specific firewall rule
-        $fwRule = @{
-            Name = "RDP-Tailscale-Pro"
-            DisplayName = "RDP via Tailscale (Restricted)"
-            Description = "Allow RDP only from Tailscale network"
-            Direction = "Inbound"
-            Action = "Allow"
-            Protocol = "TCP"
-            LocalPort = $env:RDP_PORT
-            RemoteAddress = "100.64.0.0/10"  # Tailscale IP range
-            Enabled = "True"
-            Profile = "Any"
+        $retries = 0
+        while ($retries -lt 15) {
+            $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4 2>$null
+            if ($tsIP) {
+                echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+                Write-Host "✅ Tailscale IP: $tsIP"
+                break
+            }
+            Start-Sleep -Seconds 2
+            $retries++
         }
         
-        New-NetFirewallRule @fwRule
-        
-        # 3. Disable unnecessary services
-        $servicesToDisable = @(
-            "RemoteRegistry",
-            "SSDPSRV",
-            "upnphost",
-            "WpnService"
-        )
-        
-        foreach ($service in $servicesToDisable) {
-            Set-Service -Name $service -StartupType Disabled -ErrorAction SilentlyContinue
-            Stop-Service -Name $service -Force -ErrorAction SilentlyContinue
+        if (-not $tsIP) {
+            Write-Host "⚠️ Using fallback IP detection"
+            $tsStatus = & "$env:ProgramFiles\Tailscale\tailscale.exe" status --json | ConvertFrom-Json
+            $tsIP = $tsStatus.Self.TailscaleIPs[0]
+            echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
         }
 
-    # ============== RDP ENHANCED SETUP ==============
-    - name: 🖥️ Configure Professional RDP Settings
+    # ============== WINDOWS 11 RDP CONFIGURATION ==============
+    - name: 🖥️ Enable Windows 11 RDP with Security
       run: |
-        Write-Host "🎯 Configuring Professional RDP Settings..."
+        Write-Host "🎯 Configuring Windows 11 Remote Desktop..."
         
-        # 1. Enable RDP with security
+        # 1. Enable RDP with modern security
         Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" `
             -Name "fDenyTSConnections" -Value 0 -Type DWord -Force
         
-        # 2. KEEP Network Level Authentication ENABLED (Security Best Practice)
+        # 2. Configure for Windows 11 (keep NLA enabled for security)
         Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" `
             -Name "UserAuthentication" -Value 1 -Type DWord -Force
         
-        # 3. Set encryption level to High
+        # 3. Windows 11 specific RDP enhancements
         Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" `
-            -Name "MinEncryptionLevel" -Value 3 -Type DWord -Force
+            -Name "MaxMonitors" -Value 4 -Type DWord
         
-        # 4. Configure session limits
         Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" `
-            -Name "MaxIdleTime" -Value 900000 -Type DWord -Force  # 15 minutes
+            -Name "MaxXResolution" -Value 7680 -Type DWord
         
-        # 5. Enable SSL/TLS for RDP if requested
-        if ("${{ github.event.inputs.use_ssl }}" -eq "true") {
-            Write-Host "🔐 Enabling SSL/TLS for RDP..."
-            Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" `
-                -Name "SSLCertificateSHA1Hash" -Type String -Force -ErrorAction SilentlyContinue
-        }
+        Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" `
+            -Name "MaxYResolution" -Value 4320 -Type DWord
         
-        # 6. Restart Terminal Services
-        Restart-Service -Name TermService -Force
+        # 4. Enable modern RDP features
+        Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" `
+            -Name "AVC444ModePreferred" -Value 1 -Type DWord  # H.264/AVC 444 mode
+        
+        Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" `
+            -Name "DWMFRAMEINTERVAL" -Value 15 -Type DWord  # Smooth animation
+        
+        # 5. Configure Windows 11 firewall
+        netsh advfirewall firewall delete rule name="RDP-Windows11" 2>$null
+        netsh advfirewall firewall add rule name="RDP-Windows11" dir=in action=allow protocol=TCP localport=3389 description="Windows 11 RDP via Tailscale"
+        
+        # 6. Start services
         Set-Service -Name TermService -StartupType Automatic
+        Start-Service -Name TermService -ErrorAction SilentlyContinue
         
-        Write-Host "✅ RDP Professional Configuration Complete"
+        # 7. Additional Windows 11 service
+        Set-Service -Name "SessionEnv" -StartupType Automatic
+        Start-Service -Name "SessionEnv" -ErrorAction SilentlyContinue
 
-    # ============== USER MANAGEMENT ==============
-    - name: 👥 Create Professional User Account
+    # ============== WINDOWS 11 USER CREATION ==============
+    - name: 👤 Create Windows 11 Professional User
       run: |
-        Write-Host "👤 Creating Professional User Account..."
+        Write-Host "👤 Creating Windows 11 Professional User Account..."
         
-        $securePass = ConvertTo-SecureString $env:RDP_PASS -AsPlainText -Force
+        # Convert password to secure string
+        $securePassword = ConvertTo-SecureString $env:WIN11_PASS -AsPlainText -Force
         
-        # Create user with advanced options
-        $userParams = @{
-            Name                 = $env:RDP_USER
-            Password             = $securePass
-            FullName            = "GitHub RDP Session User"
-            Description         = "Temporary RDP user for GitHub Actions session"
-            PasswordNeverExpires = $true
-            AccountNeverExpires  = $true
-            Enabled              = $true
+        # Check if user exists
+        $existingUser = Get-LocalUser -Name $env:WIN11_USER -ErrorAction SilentlyContinue
+        if ($existingUser) {
+            Write-Host "🔄 Updating existing user..."
+            Set-LocalUser -Name $env:WIN11_USER -Password $securePassword
+        } else {
+            Write-Host "🆕 Creating new user..."
+            $userParams = @{
+                Name = $env:WIN11_USER
+                Password = $securePassword
+                FullName = "Windows 11 RDP User"
+                Description = "Temporary RDP user for GitHub Actions Windows 11 session"
+                PasswordNeverExpires = $true
+                UserMayNotChangePassword = $true
+                AccountNeverExpires = $true
+            }
+            New-LocalUser @userParams
         }
         
-        New-LocalUser @userParams -ErrorAction Stop
+        # Add to required groups
+        Add-LocalGroupMember -Group "Remote Desktop Users" -Member $env:WIN11_USER -ErrorAction SilentlyContinue
         
-        # Add to required groups only
-        Add-LocalGroupMember -Group "Remote Desktop Users" -Member $env:RDP_USER
-        Add-LocalGroupMember -Group "Users" -Member $env:RDP_USER
+        # Optional: Add to Administrators (comment out for security)
+        # Add-LocalGroupMember -Group "Administrators" -Member $env:WIN11_USER -ErrorAction SilentlyContinue
         
-        # Explicitly DENY Administrator access (Security)
-        net localgroup "Administrators" $env:RDP_USER /delete 2>$null
+        # Enable the account
+        Enable-LocalUser -Name $env:WIN11_USER
         
-        # Configure user restrictions
-        $userSid = (Get-LocalUser -Name $env:RDP_USER).SID.Value
-        
-        # Set logon hours (allow all)
-        $adsi = [ADSI]"WinNT://$env:COMPUTERNAME"
-        $user = $adsi.Children.Find($env:RDP_USER, "user")
-        $user.LoginHours = [byte[]]@(255,255,255,255,255,255,255,255,255)
-        $user.SetInfo()
-        
-        Write-Host "✅ Professional User Account Created"
+        Write-Host "✅ User '$env:WIN11_USER' created/updated successfully"
 
-    # ============== SOFTWARE INSTALLATION ==============
-    - name: 📦 Install Professional Tools
+    # ============== WINDOWS 11 PERFORMANCE OPTIMIZATION ==============
+    - name: ⚡ Optimize Windows 11 Performance
       run: |
-        Write-Host "🛠️ Installing Professional Development Tools..."
+        Write-Host "⚡ Applying $env:OPTIMIZATION_PROFILE optimizations..."
         
-        # 1. Chocolatey Package Manager
-        Set-ExecutionPolicy Bypass -Scope Process -Force
-        [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
-        Invoke-Expression ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+        if ($env:OPTIMIZATION_PROFILE -eq "Development") {
+            # Development optimizations
+            Write-Host "🛠️ Applying Development optimizations..."
+            
+            # Disable visual effects for better RDP performance
+            Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects" `
+                -Name "VisualFXSetting" -Value 2 -Type DWord
+            
+            # Optimize for background services
+            powercfg /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  # High performance
+            
+            # Disable animations
+            Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" `
+                -Name "UserPreferencesMask" -Value ([byte[]](0x90,0x12,0x03,0x80,0x10,0x00,0x00,0x00)) -Type Binary
+            
+        } elseif ($env:OPTIMIZATION_PROFILE -eq "Gaming") {
+            # Gaming optimizations
+            Write-Host "🎮 Applying Gaming optimizations..."
+            
+            # Game Mode
+            Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\PolicyManager\current\device\GameDVR" `
+                -Name "AllowGameDVR" -Value 1 -Type DWord
+            
+            # Performance power plan
+            powercfg /setactive e9a42b02-d5df-448d-aa00-03f14749eb61  # Ultimate performance
+            
+        } elseif ($env:OPTIMIZATION_PROFILE -eq "Server") {
+            # Server-like optimizations
+            Write-Host "🖥️ Applying Server optimizations..."
+            
+            # Disable visual effects completely
+            Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" `
+                -Name "UserPreferencesMask" -Value ([byte[]](0x90,0x12,0x01,0x80,0x10,0x00,0x00,0x00)) -Type Binary
+            
+            # Disable Windows animations
+            Disable-Animations
+        }
         
-        # 2. Essential tools via Chocolatey
-        $packages = @(
+        # Common optimizations for all profiles
+        Write-Host "🔧 Applying common optimizations..."
+        
+        # Disable Cortana
+        Get-AppxPackage -Name *Microsoft.549981C3F5F10* | Remove-AppxPackage -ErrorAction SilentlyContinue
+        
+        # Disable telemetry
+        Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection" `
+            -Name "AllowTelemetry" -Value 0 -Type DWord
+        
+        # Disable Windows Spotlight
+        Set-ItemProperty -Path "HKCU:\Software\Policies\Microsoft\Windows\CloudContent" `
+            -Name "DisableWindowsSpotlightFeatures" -Value 1 -Type DWord
+
+    # ============== WINDOWS 11 TOOLS INSTALLATION ==============
+    - name: 🛠️ Install Windows 11 Development Tools
+      run: |
+        Write-Host "🛠️ Installing Windows 11 Professional Tools..."
+        
+        # 1. Install Chocolatey if not present
+        if (-not (Get-Command choco -ErrorAction SilentlyContinue)) {
+            Set-ExecutionPolicy Bypass -Scope Process -Force
+            [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
+            Invoke-Expression ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+        }
+        
+        # 2. Base development tools
+        $baseTools = @(
             "git",
             "vscode",
             "python",
             "nodejs",
+            "docker-desktop",
+            "postman",
             "sysinternals",
             "7zip",
-            "curl",
-            "wget",
-            "googlechrome"
+            "googlechrome",
+            "firefox"
         )
         
-        foreach ($package in $packages) {
-            choco install $package -y --no-progress --limit-output
+        foreach ($tool in $baseTools) {
+            choco install $tool -y --no-progress --limit-output --ignore-checksums
         }
         
-        # 3. PowerShell modules
-        Install-Module -Name PowerShellGet -Force -AllowClobber
-        Install-Module -Name Az -Force -AllowClobber
-        Install-Module -Name AWSPowerShell -Force -AllowClobber
+        # 3. Windows 11 specific tools
+        $win11Tools = @(
+            "powertoys",
+            "windows-terminal",
+            "microsoft-windows-terminal",
+            "wsl2",
+            "ubuntu",
+            "dotnet-sdk"
+        )
         
-        # 4. Configure VS Code with extensions
+        foreach ($tool in $win11Tools) {
+            choco install $tool -y --no-progress --limit-output
+        }
+        
+        # 4. PowerShell modules
+        Install-Module -Name PowerShellGet -Force -AllowClobber -Scope AllUsers
+        Install-Module -Name PSWindowsUpdate -Force -AllowClobber -Scope AllUsers
+        Install-Module -Name Terminal-Icons -Force -AllowClobber -Scope CurrentUser
+        
+        # 5. VS Code extensions for Windows 11
         code --install-extension ms-vscode.powershell
         code --install-extension ms-python.python
-        code --install-extension eamodio.gitlens
+        code --install-extension ms-vscode-remote.remote-wsl
+        code --install-extension ms-azuretools.vscode-docker
+        code --install-extension GitHub.copilot
 
-    # ============== NETWORK OPTIMIZATION ==============
-    - name: 📡 Optimize Network Performance
+    # ============== VERIFICATION & TESTING ==============
+    - name: ✅ Verify Windows 11 RDP Setup
       run: |
-        Write-Host "📈 Optimizing Network for RDP..."
+        Write-Host "🔍 Verifying Windows 11 RDP Configuration..."
         
-        # Optimize TCP settings for RDP
-        $tcpParams = @{
-            Path = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters"
-        }
+        # 1. Check RDP service status
+        $rdpService = Get-Service -Name TermService
+        Write-Host "RDP Service Status: $($rdpService.Status)"
         
-        Set-ItemProperty @tcpParams -Name "TcpWindowSize" -Value 64240 -Type DWord
-        Set-ItemProperty @tcpParams -Name "Tcp1323Opts" -Value 1 -Type DWord
-        Set-ItemProperty @tcpParams -Name "DefaultTTL" -Value 64 -Type DWord
-        
-        # RDP-specific optimizations
-        $rdpParams = @{
-            Path = "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp"
-        }
-        
-        Set-ItemProperty @rdpParams -Name "MaxMonitors" -Value 4 -Type DWord
-        Set-ItemProperty @rdpParams -Name "MaxXResolution" -Value 5120 -Type DWord
-        Set-ItemProperty @rdpParams -Name "MaxYResolution" -Value 2880 -Type DWord
-        
-        # Disable bandwidth auto-tuning
-        netsh interface tcp set global autotuninglevel=disabled
-        
-        Write-Host "✅ Network Optimization Complete"
-
-    # ============== MONITORING & DIAGNOSTICS ==============
-    - name: 📊 Setup Monitoring
-      run: |
-        Write-Host "📊 Setting up Session Monitoring..."
-        
-        # Create monitoring script
-        $monitorScript = @"
-        param(\$SessionId)
-        
-        function Get-SessionInfo {
-            \$info = @{
-                Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-                SessionId = \$SessionId
-                CPU = (Get-Counter '\Processor(_Total)\% Processor Time').CounterSamples.CookedValue
-                Memory = (Get-Counter '\Memory\Available MBytes').CounterSamples.CookedValue
-                RDPConnections = (quser 2>\$null | Measure-Object).Count
-                TailscaleStatus = & "C:\Program Files\Tailscale\tailscale.exe" status --json 2>\$null | ConvertFrom-Json
-            }
-            return \$info
-        }
-        
-        while (\$true) {
-            \$sessionInfo = Get-SessionInfo
-            Write-Host "MONITOR: [\$(\$sessionInfo.Timestamp)] CPU: \$([math]::Round(\$sessionInfo.CPU,1))% | RAM: \$(\$sessionInfo.Memory)MB free | RDP: \$(\$sessionInfo.RDPConnections) connections"
-            Start-Sleep -Seconds 30
-        }
-"@
-        
-        $monitorScript | Out-File -FilePath "C:\SessionMonitor.ps1" -Encoding UTF8
-        
-        # Start monitoring in background
-        Start-Job -Name "SessionMonitor" -ScriptBlock {
-            & "C:\SessionMonitor.ps1" -SessionId $env:SESSION_ID
-        }
-        
-        Write-Host "✅ Monitoring Enabled"
-
-    # ============== CONNECTION VERIFICATION ==============
-    - name: ✅ Verify Connectivity
-      run: |
-        Write-Host "🔍 Verifying RDP Connectivity..."
-        
-        # Test RDP port
-        $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port $env:RDP_PORT -WarningAction SilentlyContinue
-        
-        if ($testResult.TcpTestSucceeded) {
-            Write-Host "✅ RDP Port $($env:RDP_PORT) is accessible via Tailscale"
+        # 2. Check firewall rule
+        $firewallRule = Get-NetFirewallRule -Name "RDP-Windows11" -ErrorAction SilentlyContinue
+        if ($firewallRule) {
+            Write-Host "✅ Firewall rule configured"
         } else {
-            Write-Host "❌ RDP Port $($env:RDP_PORT) is NOT accessible"
-            # Fallback test
-            $listener = Get-NetTCPConnection -LocalPort $env:RDP_PORT -ErrorAction SilentlyContinue
-            if ($listener) {
-                Write-Host "⚠️  Port is listening but may be blocked by firewall"
-            }
+            Write-Host "⚠️ Firewall rule missing"
         }
         
-        # Test Tailscale connectivity
-        $tsPing = Test-Connection -ComputerName $env:TAILSCALE_IP -Count 2 -Quiet
-        if ($tsPing) {
-            Write-Host "✅ Tailscale network is operational"
+        # 3. Test RDP port locally
+        $listener = Get-NetTCPConnection -LocalPort 3389 -ErrorAction SilentlyContinue | Where-Object {$_.State -eq "Listen"}
+        if ($listener) {
+            Write-Host "✅ RDP listening on port 3389"
+        } else {
+            Write-Host "❌ RDP not listening"
+        }
+        
+        # 4. Test Tailscale connectivity
+        if (Test-Path "C:\Program Files\Tailscale\tailscale.exe") {
+            $tsStatus = & "C:\Program Files\Tailscale\tailscale.exe" status --json | ConvertFrom-Json
+            Write-Host "Tailscale Status: $($tsStatus.BackendState)"
+            Write-Host "Tailscale IP: $env:TAILSCALE_IP"
+        }
+        
+        # 5. Check user exists
+        $userExists = Get-LocalUser -Name $env:WIN11_USER -ErrorAction SilentlyContinue
+        if ($userExists) {
+            Write-Host "✅ User account exists"
         }
 
-    # ============== DISPLAY CONNECTION INFO ==============
-    - name: 📋 Professional Connection Dashboard
+    # ============== DISPLAY CONNECTION INFORMATION ==============
+    - name: 📋 Windows 11 Connection Dashboard
       run: |
         Write-Host ""
         Write-Host "═══════════════════════════════════════════════════════════════════════════════════════════"
-        Write-Host "                    🖥️  WINDOWS PROFESSIONAL RDP SESSION READY                          "
+        Write-Host "                    🪟 WINDOWS 11 PROFESSIONAL RDP SESSION                              "
         Write-Host "═══════════════════════════════════════════════════════════════════════════════════════════"
         Write-Host ""
-        Write-Host "📊 SESSION INFORMATION"
+        Write-Host "📊 SYSTEM INFORMATION"
         Write-Host "   ──────────────────────────────────────────────────────────────"
-        Write-Host "   Session ID    : $env:SESSION_ID"
-        Write-Host "   Started       : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+        Write-Host "   Edition       : Windows 11 $env:WINDOWS_EDITION"
+        Write-Host "   Hostname      : $env:WIN11_HOSTNAME"
+        Write-Host "   Optimized for : $env:OPTIMIZATION_PROFILE"
+        Write-Host "   Session ID    : $env:GITHUB_RUN_ID"
         Write-Host "   Timeout       : $env:SESSION_TIMEOUT minutes"
-        Write-Host "   Runner        : $env:RUNNER_NAME"
         Write-Host ""
-        Write-Host "🔒 SECURE CONNECTION DETAILS"
+        Write-Host "🔗 CONNECTION DETAILS"
         Write-Host "   ──────────────────────────────────────────────────────────────"
         Write-Host "   Tailscale IP  : $env:TAILSCALE_IP"
-        Write-Host "   Tailscale DNS : $env:TAILSCALE_DNS"
         Write-Host "   RDP Port      : $env:RDP_PORT"
-        Write-Host "   Encryption    : TLS 1.2+ (NLA Enabled)"
+        Write-Host "   Security      : NLA Enabled + Tailscale Encryption"
+        Write-Host "   Resolution    : Up to 8K (7680x4320)"
         Write-Host ""
-        Write-Host "👤 CREDENTIALS (Masked for Security)"
+        Write-Host "👤 CREDENTIALS"
         Write-Host "   ──────────────────────────────────────────────────────────────"
-        Write-Host "   Username      : ********"
-        Write-Host "   Password      : ********"
+        Write-Host "   Username      : $env:WIN11_USER"
+        Write-Host "   Password      : ******** (securely generated)"
         Write-Host ""
-        Write-Host "   💡 Actual credentials available in workflow environment variables"
+        Write-Host "   💡 Actual password in workflow environment variables"
         Write-Host ""
         Write-Host "🛠️  INSTALLED TOOLS"
         Write-Host "   ──────────────────────────────────────────────────────────────"
-        Write-Host "   • VS Code with extensions"
-        Write-Host "   • Git"
-        Write-Host "   • Python & Node.js"
-        Write-Host "   • PowerShell 7+"
-        Write-Host "   • AWS/Azure CLI tools"
-        Write-Host "   • Chrome Browser"
+        Write-Host "   • Windows Terminal + PowerShell 7"
+        Write-Host "   • VS Code with WSL & Docker extensions"
+        Write-Host "   • Git, Python, Node.js"
+        Write-Host "   • Docker Desktop"
+        Write-Host "   • WSL 2 with Ubuntu"
+        Write-Host "   • Windows PowerToys"
+        Write-Host "   • Chrome, Firefox, Postman"
         Write-Host ""
-        Write-Host "🚀 QUICK CONNECT COMMANDS"
+        Write-Host "🚀 QUICK CONNECT"
         Write-Host "   ──────────────────────────────────────────────────────────────"
         Write-Host "   Windows RDP  : mstsc /v:$env:TAILSCALE_IP"
-        Write-Host "   Linux/Mac    : xfreerdp /v:$env:TAILSCALE_IP /u:$env:RDP_USER"
+        Write-Host "   Command      : xfreerdp /v:$env:TAILSCALE_IP /u:$env:WIN11_USER +glyph-cache"
         Write-Host ""
-        Write-Host "⚠️  IMPORTANT NOTES"
+        Write-Host "⚡ PERFORMANCE TIPS"
         Write-Host "   ──────────────────────────────────────────────────────────────"
-        Write-Host "   • Session will auto-terminate after $env:SESSION_TIMEOUT minutes"
-        Write-Host "   • All credentials are temporary and securely generated"
-        Write-Host "   • User has NO administrative privileges (security)"
-        Write-Host "   • Connection is encrypted end-to-end via Tailscale"
+        Write-Host "   • Use Windows Terminal for better performance"
+        Write-Host "   • Enable H.264 in RDP client settings"
+        Write-Host "   • Adjust color depth to 16-bit for slower connections"
         Write-Host ""
-        Write-Host "📞 TROUBLESHOOTING"
+        Write-Host "⚠️  SECURITY NOTES"
         Write-Host "   ──────────────────────────────────────────────────────────────"
-        Write-Host "   • Verify Tailscale client is connected to same network"
-        Write-Host "   • Check Tailscale admin console for device status"
-        Write-Host "   • Use 'tailscale ping $env:TAILSCALE_IP' to test connectivity"
+        Write-Host "   • Session auto-terminates after timeout"
+        Write-Host "   • All connections encrypted via Tailscale"
+        Write-Host "   • Credentials are temporary and unique"
+        Write-Host "   • User has limited privileges (security best practice)"
         Write-Host ""
         Write-Host "═══════════════════════════════════════════════════════════════════════════════════════════"
         Write-Host ""
         
-        # Keep session info in workflow summary
-        echo "## 🖥️ Windows Professional RDP Session" >> $GITHUB_STEP_SUMMARY
+        # Add to GitHub summary
+        echo "## 🪟 Windows 11 $env:WINDOWS_EDITION RDP Session" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        echo "**Session ID:** $env:SESSION_ID" >> $GITHUB_STEP_SUMMARY
-        echo "**Tailscale IP:** $env:TAILSCALE_IP" >> $GITHUB_STEP_SUMMARY
-        echo "**Timeout:** $env:SESSION_TIMEOUT minutes" >> $GITHUB_STEP_SUMMARY
+        echo "**Hostname:** $env:WIN11_HOSTNAME" >> $GITHUB_STEP_SUMMARY
+        echo "**Tailscale IP:** \`$env:TAILSCALE_IP\`" >> $GITHUB_STEP_SUMMARY
+        echo "**Username:** \`$env:WIN11_USER\`" >> $GITHUB_STEP_SUMMARY
+        echo "**Session Timeout:** $env:SESSION_TIMEOUT minutes" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        echo "*Credentials are securely stored in environment variables*" >> $GITHUB_STEP_SUMMARY
+        echo "**Connect:** \`mstsc /v:$env:TAILSCALE_IP\`" >> $GITHUB_STEP_SUMMARY
 
     # ============== SESSION MAINTENANCE ==============
-    - name: ⏳ Maintain Professional Session
+    - name: ⏳ Maintain Windows 11 Session
       timeout-minutes: ${{ env.SESSION_TIMEOUT }}
       run: |
         Write-Host ""
-        Write-Host "⏰ Session active for $env:SESSION_TIMEOUT minutes..."
-        Write-Host "   Press 'Cancel workflow' to terminate early"
+        Write-Host "⏰ Windows 11 Session Active - Monitoring..."
+        Write-Host "   Press 'Cancel workflow' in GitHub to terminate early"
         Write-Host ""
         
         $startTime = Get-Date
-        $timeoutMinutes = [int]$env:SESSION_TIMEOUT
+        $timeout = [int]$env:SESSION_TIMEOUT
+        
+        function Show-SessionStatus {
+            $elapsed = (Get-Date) - $startTime
+            $remaining = $timeout - [math]::Round($elapsed.TotalMinutes, 0)
+            
+            # Get system info
+            $cpu = Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average | Select-Object -ExpandProperty Average
+            $ram = Get-CimInstance Win32_OperatingSystem | ForEach-Object { "{0:N1}" -f (($_.TotalVisibleMemorySize - $_.FreePhysicalMemory) / 1MB) }
+            $connections = (quser 2>$null | Measure-Object).Count
+            
+            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Status: "
+            Write-Host "   Time remaining: $remaining minutes"
+            Write-Host "   CPU Usage: $cpu%"
+            Write-Host "   RAM Used: $ram GB"
+            Write-Host "   RDP Connections: $connections"
+            Write-Host ""
+        }
         
         while ($true) {
+            Show-SessionStatus
+            
+            # Check timeout
             $elapsed = (Get-Date) - $startTime
-            $remaining = $timeoutMinutes - [math]::Round($elapsed.TotalMinutes, 0)
-            
-            if ($remaining -le 0) {
-                Write-Host "⏰ Session timeout reached"
+            if ($elapsed.TotalMinutes -ge $timeout) {
+                Write-Host "⏰ Session timeout reached - Shutting down..."
                 break
-            }
-            
-            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Session active - $remaining minutes remaining"
-            
-            # Check RDP connections
-            $connections = (quser 2>$null | Measure-Object).Count
-            Write-Host "   Active RDP connections: $connections"
-            
-            # Health check
-            $services = Get-Service -Name TermService, Tailscale
-            foreach ($service in $services) {
-                if ($service.Status -ne "Running") {
-                    Write-Host "   ⚠️  $($service.Name) service is $($service.Status)"
-                }
             }
             
             Start-Sleep -Seconds 60
         }
 
-    # ============== PROFESSIONAL CLEANUP ==============
-    - name: 🧹 Professional Cleanup Procedure
+    # ============== CLEANUP ==============
+    - name: 🧹 Windows 11 Cleanup
       if: always()
       run: |
         Write-Host ""
-        Write-Host "🧹 Executing Professional Cleanup Procedure..."
+        Write-Host "🧹 Cleaning up Windows 11 session..."
         
-        # 1. Terminate user sessions
-        Write-Host "   Terminating user sessions..."
-        logoff /server:localhost 2>$null
+        # 1. Disconnect all RDP sessions
+        Write-Host "   Disconnecting RDP sessions..."
         logoff /server:localhost 2>$null
         
         # 2. Remove user account
         Write-Host "   Removing temporary user..."
-        Remove-LocalUser -Name $env:RDP_USER -ErrorAction SilentlyContinue
+        Remove-LocalUser -Name $env:WIN11_USER -ErrorAction SilentlyContinue
         
         # 3. Disable RDP
-        Write-Host "   Securing RDP settings..."
+        Write-Host "   Securing RDP..."
         Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" `
             -Name "fDenyTSConnections" -Value 1 -Type DWord -Force
         
-        # 4. Clean firewall rules
+        # 4. Clean firewall
         Write-Host "   Removing firewall rules..."
-        Remove-NetFirewallRule -Name "RDP-Tailscale-Pro" -ErrorAction SilentlyContinue
+        Remove-NetFirewallRule -Name "RDP-Windows11" -ErrorAction SilentlyContinue
         
         # 5. Disconnect Tailscale
         Write-Host "   Disconnecting Tailscale..."
-        & "C:\Program Files\Tailscale\tailscale.exe" down 2>$null
+        if (Test-Path "C:\Program Files\Tailscale\tailscale.exe") {
+            & "C:\Program Files\Tailscale\tailscale.exe" down 2>$null
+        }
         
-        # 6. Remove monitoring script
-        Write-Host "   Cleaning up monitoring..."
-        Remove-Item -Path "C:\SessionMonitor.ps1" -ErrorAction SilentlyContinue
-        Get-Job -Name "SessionMonitor" 2>$null | Remove-Job -Force
-        
-        # 7. Reset security policies
-        Write-Host "   Resetting security policies..."
-        Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue
-        
-        Write-Host "✅ Professional Cleanup Complete"
+        Write-Host "✅ Windows 11 cleanup complete"
         Write-Host ""
