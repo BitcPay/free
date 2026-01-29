@@ -1,135 +1,23 @@
-name: 🛡️ Secure Windows Dev Environment
+# Save as: .github/workflows/test.yml
+name: Test Windows Environment
 
-on:
-  workflow_dispatch:
-    inputs:
-      environment_type:
-        description: 'Choose environment type'
-        required: true
-        default: 'docker'
-        type: choice
-        options:
-        - docker
-        - vm
-        - codespace
-      duration_minutes:
-        description: 'Session duration (minutes)'
-        required: false
-        default: '60'
-
-env:
-  SECRET_PREFIX: "dev-${{ github.run_id }}"
-  SESSION_TIMEOUT: ${{ github.event.inputs.duration_minutes || 60 }}
+on: workflow_dispatch
 
 jobs:
-  docker-environment:
-    if: github.event.inputs.environment_type == 'docker'
+  test:
     runs-on: windows-latest
-    timeout-minutes: ${{ env.SESSION_TIMEOUT }}
+    timeout-minutes: 10
     
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-      
-    - name: Setup Windows Docker
+    - name: Show Windows Info
       run: |
-        # Pull Windows images
-        docker pull mcr.microsoft.com/windows/servercore:ltsc2022
-        docker pull mcr.microsoft.com/dotnet/sdk:8.0-nanoserver-ltsc2022
+        Write-Host "✅ Windows version:"
+        systeminfo | Select-String "OS Name", "OS Version"
         
-        Write-Host "✅ Windows Docker ready"
-        
-    - name: Create Dev Container
-      run: |
-        # Create docker-compose.yml
-        @"
-        version: '3.8'
-        services:
-          devbox:
-            image: mcr.microsoft.com/dotnet/sdk:8.0-nanoserver-ltsc2022
-            container_name: windows-dev-${{ env.SECRET_PREFIX }}
-            volumes:
-              - ./:/workspace
-            stdin_open: true
-            tty: true
-            command: powershell
-        "@ | Out-File -FilePath docker-compose.yml -Encoding UTF8
-        
-        # Start container
-        docker-compose up -d
-        
-    - name: Development Session
-      timeout-minutes: ${{ env.SESSION_TIMEOUT - 5 }}
-      run: |
-        Write-Host "========================================="
-        Write-Host "🛡️  SECURE WINDOWS DEVELOPMENT ENVIRONMENT"
-        Write-Host "========================================="
-        Write-Host "📦 Container: windows-dev-${{ env.SECRET_PREFIX }}"
-        Write-Host "⏱️  Timeout: ${{ env.SESSION_TIMEOUT }} minutes"
-        Write-Host "🔧 Tools: .NET 8, PowerShell"
-        Write-Host "📁 Workspace: /workspace"
         Write-Host ""
-        Write-Host "💡 Access container with:"
-        Write-Host "  docker exec -it windows-dev-${{ env.SECRET_PREFIX }} pwsh"
+        Write-Host "📁 Current directory:"
+        Get-ChildItem | Format-Table Name
         
-        # Keep-alive
-        $endTime = (Get-Date).AddMinutes(${{ env.SESSION_TIMEOUT }})
-        while ((Get-Date) -lt $endTime) {
-            $remaining = [math]::Round(($endTime - (Get-Date)).TotalMinutes, 1)
-            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Active: ${remaining}m left"
-            Start-Sleep -Seconds 60
-        }
-        
-    - name: Cleanup
-      if: always()
-      run: |
-        Write-Host "🧹 Cleaning up..."
-        docker-compose down -v
-
-  vm-environment:
-    if: github.event.inputs.environment_type == 'vm'
-    runs-on: windows-latest
-    timeout-minutes: ${{ env.SESSION_TIMEOUT }}
-    
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-      
-    - name: Setup Development Tools
-      run: |
-        # Install Chocolatey packages
-        Set-ExecutionPolicy Bypass -Scope Process -Force
-        [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
-        
-        # Install tools
-        $tools = @("git", "nodejs", "python", "vscode")
-        foreach ($tool in $tools) {
-          choco install $tool -y --no-progress
-        }
-        
-    - name: Development Session
-      run: |
-        Write-Host "========================================="
-        Write-Host "🖥️  WINDOWS VM DEVELOPMENT SESSION"
-        Write-Host "========================================="
-        Write-Host "⏱️  Duration: ${{ env.SESSION_TIMEOUT }} minutes"
-        Write-Host "🛠️  Tools: VS Code, Git, Node.js, Python"
-        Write-Host "📁 Workspace: $pwd"
         Write-Host ""
-        Write-Host "🔒 SECURE: No RDP, No exposed ports"
-        
-        # Keep-alive
-        $endTime = (Get-Date).AddMinutes(${{ env.SESSION_TIMEOUT }})
-        while ((Get-Date) -lt $endTime) {
-            $remaining = [math]::Round(($endTime - (Get-Date)).TotalMinutes, 1)
-            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Active: ${remaining}m left"
-            Start-Sleep -Seconds 60
-        }
-        
-    - name: Save Artifacts
-      if: success()
-      uses: actions/upload-artifact@v4
-      with:
-        name: workspace-backup
-        path: .
-        retention-days: 1
+        Write-Host "⏱️ Running for 5 minutes..."
+        Start-Sleep -Seconds 300
