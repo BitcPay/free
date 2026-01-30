@@ -1,4 +1,4 @@
-name: Fixed
+name: R Fixed
 
 on:
   workflow_dispatch:
@@ -85,7 +85,8 @@ jobs:
           Write-Host "Downloading ProxyScrape Proxy Checker..."
           $psUrl = "https://downloads.cdn.proxyscrape.com/proxy-checker/proxyscrape-proxy-checker-v1.1.0-x64-win-installer.exe"
           $psPath = "$env:TEMP\proxyscrape-installer.exe"
-          Invoke-WebRequest -Uri $psUrl -OutFile $psPath
+          # Using curl.exe for better reliability with binary downloads
+          curl.exe -L $psUrl -o $psPath
           
           Write-Host "Installing ProxyScrape..."
           Start-Process $psPath -ArgumentList "/S" -Wait
@@ -94,7 +95,8 @@ jobs:
           Write-Host "Downloading XAMPP..."
           $xamppUrl = "https://sourceforge.net/projects/xampp/files/XAMPP%20Windows/8.2.12/xampp-windows-x64-8.2.12-0-VS16-installer.exe/download"
           $xamppPath = "$env:TEMP\xampp-installer.exe"
-          Invoke-WebRequest -Uri $xamppUrl -OutFile $xamppPath
+          # Using curl.exe -L to follow SourceForge redirects correctly
+          curl.exe -L $xamppUrl -o $xamppPath
           
           Write-Host "Installing XAMPP (This may take a few minutes)..."
           # --mode unattended installs XAMPP silently without GUI prompts
