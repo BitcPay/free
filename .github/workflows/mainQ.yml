@@ -1,0 +1,40 @@
+name: RDP Server Setup
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      
+    - name: Setup RDP
+      run: |
+        # Enable RDP
+        reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server" /v fDenyTSConnections /t REG_DWORD /d 0 /f
+        
+        # Set password for Administrator
+        net user Administrator "Admin@123456" /Y
+        
+        # Allow RDP in firewall
+        netsh advfirewall firewall add rule name="Open RDP Port" dir=in action=allow protocol=TCP localport=3389
+        
+        Write-Host "RDP is now enabled!"
+        Write-Host "Username: Administrator"
+        Write-Host "Password: Admin@123456"
+        
+    - name: Wait for manual RDP connection
+      run: |
+        Write-Host "RDP Server is ready!"
+        Write-Host "This runner will stay active for 60 minutes..."
+        Write-Host "Press 'Cancel workflow' to stop."
+        
+        # Keep the runner alive
+        $counter = 0
+        while ($counter -lt 360) {  # 60 minutes
+            Start-Sleep -Seconds 10
+            $counter++
+        }
