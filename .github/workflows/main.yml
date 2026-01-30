@@ -1,0 +1,238 @@
+name: RDP-Tailscale-Enhanced
+
+on:
+  workflow_dispatch:
+
+jobs:
+  secure-rdp:
+    runs-on: windows-latest
+    timeout-minutes: 3600
+
+    steps:
+      # 1. Enable RDP and Configure Firewall
+      - name: Configure RDP Settings
+        run: |
+          # Enable Remote Desktop
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+          
+          # Disable Network Level Authentication (Allows connection without initial auth screen)
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+          
+          # Remove old firewall rules to avoid duplicates
+          netsh advfirewall firewall delete rule name="RDP-Tailscale" 2>$null
+          
+          # Allow port 3389 through firewall
+          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
+          
+          # Restart RDP Service to apply changes
+          Restart-Service -Name TermService -Force
+
+      # 2. Manage Users and Passwords
+      - name: Reset Admin Passwords
+        run: |
+          # Use secret or generate random password
+          if ("${{ secrets.RDP_PASSWORD }}" -ne "") {
+              $password = "${{ secrets.RDP_PASSWORD }}"
+          } else {
+              # Generate random 16-character password
+              $password = -join ((48..57) + (65..90) + (97..122) | Get-Random -Count 16 | % {[char]$_})
+          }
+          
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+          
+          # Store password for later use
+          $env:RDP_PASSWORD = $password
+          echo "RDP_PASSWORD=$password" >> $env:GITHUB_ENV
+          
+          # FIX: Explicitly reset runneradmin password
+          Write-Host "Resetting runneradmin password..."
+          Set-LocalUser -Name "runneradmin" -Password $securePass
+          
+          # Also ensure the 'RDP' user exists and has the same password
+          if (-not (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue)) {
+              New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
+              Add-LocalGroupMember -Group "Administrators" -Member "RDP"
+              Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
+          } else {
+              Set-LocalUser -Name "RDP" -Password $securePass
+          }
+
+      # 3. AUTO-INSTALL: Essential Software and Tools
+      - name: Auto-Install Essential Tools
+        run: |
+          Write-Host "=== Installing Essential Tools ==="
+          
+          # Create tools directory
+          $toolsDir = "C:\Tools"
+          New-Item -ItemType Directory -Path $toolsDir -Force
+          
+          # 3.1 Install Chocolatey (Package Manager)
+          Write-Host "Installing Chocolatey..."
+          Set-ExecutionPolicy Bypass -Scope Process -Force
+          [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
+          iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+          choco feature enable -n allowGlobalConfirmation
+          
+          # 3.2 Install Common Tools via Chocolatey
+          $packages = @(
+              "googlechrome",        # Web Browser
+              "firefox",             # Alternative Browser
+              "vscode",              # Code Editor
+              "git",                 # Version Control
+              "python",              # Python 3
+              "nodejs",              # Node.js
+              "7zip",                # Compression Tool
+              "curl",                # HTTP Client
+              "wget",                # Download Tool
+              "putty",               # SSH Client
+              "notepadplusplus",     # Text Editor
+              "sysinternals",        # Sysinternals Suite
+              "wireshark",           # Network Analyzer
+              "nmap",                # Network Scanner
+              "proxifier"            # Proxy Tool
+          )
+          
+          foreach ($package in $packages) {
+              Write-Host "Installing $package..."
+              choco install $package -y --ignore-checksums
+          }
+          
+          # 3.3 Install PowerShell 7
+          Write-Host "Installing PowerShell 7..."
+          choco install powershell-core -y
+          
+          # 3.4 Install Windows Terminal
+          Write-Host "Installing Windows Terminal..."
+          choco install microsoft-windows-terminal -y
+          
+          # 3.5 Download ProxyScrape Tools (Just download, no checking)
+          Write-Host "Downloading proxy-related tools..."
+          
+          # Download proxy list grabber script
+          $proxyScript = @'
+function Get-ProxyScrapeList {
+    param(
+        [string]$Type = "http",  # http, socks4, socks5
+        [int]$Timeout = 10000,
+        [int]$Limit = 100
+    )
+    
+    $apiUrls = @{
+        "http" = "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=$($Timeout)&country=all&ssl=all&anonymity=all"
+        "socks4" = "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=socks4&timeout=$($Timeout)&country=all"
+        "socks5" = "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=socks5&timeout=$($Timeout)&country=all"
+    }
+    
+    if (-not $apiUrls.ContainsKey($Type)) {
+        Write-Error "Invalid type. Use: http, socks4, socks5"
+        return
+    }
+    
+    try {
+        Write-Host "Fetching $Type proxies from ProxyScrape..."
+        $proxies = (Invoke-RestMethod -Uri $apiUrls[$Type]).Trim() -split "`r?`n"
+        
+        if ($Limit -gt 0) {
+            $proxies = $proxies[0..($Limit-1)]
+        }
+        
+        Write-Host "Found $($proxies.Count) proxies"
+        
+        # Save to file
+        $desktop = [Environment]::GetFolderPath("Desktop")
+        $fileName = "proxies_${Type}_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
+        $filePath = "$desktop\$fileName"
+        $proxies | Out-File -FilePath $filePath
+        Write-Host "Proxies saved to: $filePath"
+        
+        return $proxies
+    }
+    catch {
+        Write-Error "Failed to fetch proxies: $_"
+    }
+}
+'@
+          
+          # Save the script
+          $scriptPath = "$toolsDir\ProxyScrape-Tools.ps1"
+          $proxyScript | Out-File -FilePath $scriptPath -Encoding UTF8
+          
+          # Create desktop shortcut to tools folder
+          $desktop = [Environment]::GetFolderPath("Desktop")
+          $shortcutPath = "$desktop\Tools Folder.lnk"
+          $WScriptShell = New-Object -ComObject WScript.Shell
+          $shortcut = $WScriptShell.CreateShortcut($shortcutPath)
+          $shortcut.TargetPath = $toolsDir
+          $shortcut.Save()
+          
+          Write-Host "=== Tool Installation Complete ==="
+
+      # 4. Install Tailscale
+      - name: Install Tailscale
+        run: |
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          $installerPath = "$env:TEMP\tailscale.msi"
+          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+          Remove-Item $installerPath -Force
+
+      # 5. Connect Tailscale
+      - name: Establish Tailscale Connection
+        run: |
+          # Bring up Tailscale with auth key. --reset ensures clean state.
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID --reset
+          
+          # Wait for IP assignment
+          $tsIP = $null
+          $retries = 0
+          while (-not $tsIP -and $retries -lt 20) {
+              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+              Start-Sleep -Seconds 3
+              $retries++
+          }
+          
+          if (-not $tsIP) {
+              Write-Error "Tailscale IP not assigned. Check Auth Key."
+              exit 1
+          }
+          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+      
+      # 6. Verify Connectivity
+      - name: Verify RDP Accessibility
+        run: |
+          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
+          if (-not $testResult.TcpTestSucceeded) {
+              Write-Error "RDP Port 3389 is not reachable."
+              exit 1
+          }
+          Write-Host "RDP Port 3389 is Open and Reachable."
+
+      # 7. Display Credentials and Maintain Connection
+      - name: Display Connection Info
+        run: |
+          Write-Host "`n============================================"
+          Write-Host "   RDP CONNECTION ESTABLISHED"
+          Write-Host "============================================"
+          Write-Host "IP Address : $env:TAILSCALE_IP"
+          Write-Host "Username   : runneradmin"
+          Write-Host "Password   : $env:RDP_PASSWORD"
+          Write-Host "--------------------------------------------"
+          Write-Host "Backup User: RDP"
+          Write-Host "Backup Pass: $env:RDP_PASSWORD"
+          Write-Host "============================================"
+          Write-Host "INSTALLED TOOLS:"
+          Write-Host "- Chrome, Firefox, VS Code, Git"
+          Write-Host "- Python, Node.js, 7-Zip, Notepad++"
+          Write-Host "- PowerShell 7, Windows Terminal"
+          Write-Host "- Nmap, Wireshark, Proxifier, Putty"
+          Write-Host "- ProxyScrape tool in C:\Tools\ProxyScrape-Tools.ps1"
+          Write-Host "============================================"
+          Write-Host "TIP: Click 'Show Options' in RDP client, save"
+          Write-Host "     these credentials to auto-fill next time."
+          Write-Host "============================================`n"
+          
+          # Keep runner active
+          while ($true) {
+              Write-Host "[$(Get-Date)] Session Active... (Press 'Cancel Workflow' to stop)"
+              Start-Sleep -Seconds 300
+          }
