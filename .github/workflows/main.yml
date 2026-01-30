@@ -1,436 +1,169 @@
-name: RDP-Tailscale-Full-Stack
+name: RDP Full Stack with Proxy Tools
 
 on:
-  workflow_dispatch:
-    inputs:
-      custom_password:
-        description: 'Custom RDP Password (optional)'
-        required: false
-        default: ''
-        type: string
+  workflow_dispatch:  # This enables the manual run button
 
 jobs:
-  secure-rdp:
+  setup-rdp:
     runs-on: windows-latest
     timeout-minutes: 3600
 
     steps:
-      # 1. Check if Actions have proper permissions
-      - name: Check Permissions
+      - name: Display Start Info
         run: |
-          Write-Host "Workflow started with custom password: ${{ github.event.inputs.custom_password }}"
-          Write-Host "GitHub Run ID: ${{ github.run_id }}"
-          Write-Host "GitHub Run Number: ${{ github.run_number }}"
+          Write-Host "🚀 Starting RDP Full Stack Setup..."
+          Write-Host "GitHub Run ID: $env:GITHUB_RUN_ID"
 
-      # 2. Enable RDP and Configure Firewall
-      - name: Configure RDP Settings
+      - name: Configure RDP
         run: |
-          # Enable Remote Desktop
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+          # Enable RDP
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
           
-          # Disable Network Level Authentication
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+          # Disable NLA for easier connection
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0
           
-          # Configure firewall
-          netsh advfirewall firewall delete rule name="RDP-Tailscale" 2>$null
-          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
+          # Firewall rules
+          netsh advfirewall firewall add rule name="RDP" dir=in action=allow protocol=TCP localport=3389
           
-          # Restart RDP Service
-          Restart-Service -Name TermService -Force
+          # Restart service
+          Restart-Service TermService -Force
 
-      # 3. Manage Users and Passwords
-      - name: Reset Admin Passwords
+      - name: Create RDP User
         run: |
-          # Use custom input, secret, or generate random password
-          if ("${{ github.event.inputs.custom_password }}" -ne "") {
-              $password = "${{ github.event.inputs.custom_password }}"
-          } elseif ("${{ secrets.RDP_PASSWORD }}" -ne "") {
-              $password = "${{ secrets.RDP_PASSWORD }}"
-          } else {
-              # Generate random 16-character password
-              $charSet = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*'
-              $password = -join ((1..16) | ForEach-Object { $charSet[(Get-Random -Minimum 0 -Maximum $charSet.Length)] })
-          }
-          
+          # Generate secure password
+          Add-Type -AssemblyName System.Web
+          $password = [System.Web.Security.Membership]::GeneratePassword(12, 2)
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
           
-          # Store password
+          # Save password to environment
           echo "RDP_PASSWORD=$password" >> $env:GITHUB_ENV
-          Write-Host "##[debug] Password set (first 4 chars): $($password.Substring(0,4))..."
           
-          # Ensure runneradmin exists and set password
-          if (-not (Get-LocalUser -Name "runneradmin" -ErrorAction SilentlyContinue)) {
-              New-LocalUser -Name "runneradmin" -Password $securePass -AccountNeverExpires
-              Add-LocalGroupMember -Group "Administrators" -Member "runneradmin"
-              Add-LocalGroupMember -Group "Remote Desktop Users" -Member "runneradmin"
+          # Create or update user
+          $userName = "rdpuser"
+          $userExists = Get-LocalUser -Name $userName -ErrorAction SilentlyContinue
+          
+          if ($userExists) {
+              Set-LocalUser -Name $userName -Password $securePass
           } else {
-              Set-LocalUser -Name "runneradmin" -Password $securePass
+              New-LocalUser -Name $userName -Password $securePass -AccountNeverExpires
+              Add-LocalGroupMember -Group "Administrators" -Member $userName
+              Add-LocalGroupMember -Group "Remote Desktop Users" -Member $userName
           }
           
-          # Create/update RDP user
-          if (-not (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue)) {
-              New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
-              Add-LocalGroupMember -Group "Administrators" -Member "RDP"
-              Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
-          } else {
-              Set-LocalUser -Name "RDP" -Password $securePass
-          }
+          Write-Host "User created: $userName"
+          Write-Host "Password: $password"
 
-      # 4. Auto-Install Essential Tools
-      - name: Auto-Install Essential Tools
+      - name: Install Essential Tools
         run: |
-          Write-Host "=== Installing Essential Tools ==="
-          
-          # Create tools directory
-          $toolsDir = "C:\Tools"
-          New-Item -ItemType Directory -Path $toolsDir -Force
-          
           # Install Chocolatey
-          Write-Host "Installing Chocolatey..."
           Set-ExecutionPolicy Bypass -Scope Process -Force
           [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
           iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
-          choco feature enable -n allowGlobalConfirmation
           
           # Install tools
-          $packages = @(
-              "googlechrome",
-              "firefox",
-              "vscode",
-              "git",
-              "python",
-              "nodejs",
-              "7zip",
-              "curl",
-              "wget",
-              "putty",
-              "notepadplusplus"
-          )
-          
-          foreach ($package in $packages) {
-              Write-Host "Installing $package..."
-              choco install $package -y --ignore-checksums
-          }
-          
-          # Install additional tools
-          choco install powershell-core -y
-          choco install microsoft-windows-terminal -y
-          
-          Write-Host "=== Tool Installation Complete ==="
+          choco install -y googlechrome firefox vscode git python nodejs 7zip notepadplusplus
 
-      # 5. Install Tailscale
       - name: Install Tailscale
         run: |
-          Write-Host "=== Installing Tailscale ==="
-          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
-          $installerPath = "$env:TEMP\tailscale.msi"
-          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
-          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
-          Remove-Item $installerPath -Force
-          Write-Host "✓ Tailscale installed successfully"
-
-      # 6. Install XAMPP
-      - name: Install XAMPP
-        run: |
-          Write-Host "=== Installing XAMPP ==="
-          
-          # Download XAMPP
-          $xamppUrl = "https://sourceforge.net/projects/xampp/files/XAMPP%20Windows/8.2.12/xampp-windows-x64-8.2.12-0-VS16-installer.exe/download"
-          $xamppInstaller = "$env:TEMP\xampp-installer.exe"
-          
-          Write-Host "Downloading XAMPP..."
-          Invoke-WebRequest -Uri $xamppUrl -OutFile $xamppInstaller -UserAgent "Mozilla/5.0"
-          
-          # Install XAMPP silently
-          Write-Host "Installing XAMPP (this may take a few minutes)..."
-          $installArgs = @(
-              "--mode", "unattended",
-              "--launchapps", "0",
-              "--disable-services"
-          )
-          
-          Start-Process -FilePath $xamppInstaller -ArgumentList $installArgs -Wait
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi"
+          $installer = "$env:TEMP\tailscale.msi"
+          Invoke-WebRequest -Uri $tsUrl -OutFile $installer
+          msiexec /i $installer /quiet /norestart
           Start-Sleep -Seconds 10
           
-          # Configure XAMPP
-          Write-Host "Configuring XAMPP..."
-          
-          # Create desktop shortcut
-          $desktop = [Environment]::GetFolderPath("Desktop")
-          $WScriptShell = New-Object -ComObject WScript.Shell
-          $desktopShortcut = "$desktop\XAMPP Control Panel.lnk"
-          $shortcut = $WScriptShell.CreateShortcut($desktopShortcut)
-          $shortcut.TargetPath = "C:\xampp\xampp-control.exe"
-          $shortcut.WorkingDirectory = "C:\xampp"
-          $shortcut.Save()
-          
-          # Create XAMPP info file
-          $xamppInfo = @"
-XAMPP Installation Complete!
-============================
-Installation Path: C:\xampp
-Apache: Port 80
-MySQL: Port 3306
-PHPMyAdmin: http://localhost/phpmyadmin
-HTDocs: C:\xampp\htdocs\
+          # Connect Tailscale
+          if ("${{ secrets.TAILSCALE_AUTH_KEY }}" -ne "") {
+              & "C:\Program Files\Tailscale\tailscale.exe" up --authkey="${{ secrets.TAILSCALE_AUTH_KEY }}" --hostname=github-rdp-$env:GITHUB_RUN_ID
+          } else {
+              Write-Host "⚠️ No Tailscale auth key provided. Please add TAILSCALE_AUTH_KEY to secrets."
+          }
 
-Quick Start:
-1. Open XAMPP Control Panel from Desktop
-2. Start Apache and MySQL
-3. Place your PHP files in C:\xampp\htdocs\
-4. Access via: http://localhost/your-project/
-
-Default MySQL Credentials:
-- Username: root
-- Password: (blank - no password)
-
-"@
-          
-          $xamppInfo | Out-File -FilePath "$desktop\XAMPP_README.txt" -Encoding UTF8
-          Write-Host "✓ XAMPP installed and configured"
-
-      # 7. Install ProxyScrape Proxy Checker (Official GUI Application)
-      - name: Install ProxyScrape Proxy Checker
+      - name: Install XAMPP
         run: |
-          Write-Host "=== Installing ProxyScrape Proxy Checker (Official GUI) ==="
+          Write-Host "Installing XAMPP..."
+          $xamppUrl = "https://sourceforge.net/projects/xampp/files/XAMPP%20Windows/8.2.12/xampp-windows-x64-8.2.12-0-VS16-installer.exe/download"
+          $installer = "$env:TEMP\xampp.exe"
           
-          # Download the official ProxyScrape Proxy Checker
-          $proxyCheckerUrl = "https://downloads.cdn.proxyscrape.com/proxy-checker/proxyscrape-proxy-checker-v1.1.0-x64-win-installer.exe"
-          $installerPath = "$env:TEMP\proxyscrape-checker.exe"
-          
-          Write-Host "Downloading ProxyScrape Proxy Checker..."
-          Invoke-WebRequest -Uri $proxyCheckerUrl -OutFile $installerPath -UserAgent "Mozilla/5.0"
+          # Download
+          Invoke-WebRequest -Uri $xamppUrl -OutFile $installer
           
           # Install silently
-          Write-Host "Installing ProxyScrape Proxy Checker..."
-          $installDir = "C:\Program Files\ProxyScrape Proxy Checker"
+          Start-Process -FilePath $installer -ArgumentList "--mode unattended" -Wait
           
-          # Create installation arguments
-          $installArgs = @(
-              "/S",                    # Silent mode
-              "/D=$installDir"         # Installation directory
-          )
-          
-          # Run installer
-          Start-Process -FilePath $installerPath -ArgumentList $installArgs -Wait
-          
-          # Create desktop shortcut
-          $desktop = [Environment]::GetFolderPath("Desktop")
-          $WScriptShell = New-Object -ComObject WScript.Shell
-          $shortcutPath = "$desktop\ProxyScrape Proxy Checker.lnk"
-          $shortcut = $WScriptShell.CreateShortcut($shortcutPath)
-          $shortcut.TargetPath = "$installDir\proxyscrape-proxy-checker.exe"
-          $shortcut.WorkingDirectory = $installDir
-          $shortcut.IconLocation = "$installDir\proxyscrape-proxy-checker.exe,0"
+          # Create shortcut
+          $shell = New-Object -ComObject WScript.Shell
+          $shortcut = $shell.CreateShortcut("$env:USERPROFILE\Desktop\XAMPP.lnk")
+          $shortcut.TargetPath = "C:\xampp\xampp-control.exe"
           $shortcut.Save()
           
-          # Create Start Menu shortcut
-          $startMenu = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs"
-          $startMenuShortcut = "$startMenu\ProxyScrape Proxy Checker.lnk"
-          $shortcut2 = $WScriptShell.CreateShortcut($startMenuShortcut)
-          $shortcut2.TargetPath = "$installDir\proxyscrape-proxy-checker.exe"
-          $shortcut2.WorkingDirectory = $installDir
-          $shortcut2.Save()
-          
-          # Create README file
-          $readmeContent = @"
-ProxyScrape Proxy Checker v1.1.0
-================================
+          Write-Host "✓ XAMPP installed"
 
-Official GUI Application by ProxyScrape
-Website: https://proxyscrape.com
-
-Features:
-1. Import proxies from files or URLs
-2. Check proxy speed and anonymity
-3. Filter by country, protocol, speed
-4. Export results in multiple formats
-5. Multi-threaded checking
-6. Real-time statistics
-
-Quick Start:
-1. Launch "ProxyScrape Proxy Checker" from Desktop
-2. Click "Import" to add proxy list
-3. Configure settings (optional)
-4. Click "Start Check"
-5. Export working proxies
-
-Default Import Formats:
-- TXT: One proxy per line (ip:port)
-- CSV: Comma-separated values
-- Direct URL import from ProxyScrape API
-
-Supported Protocols:
-- HTTP/HTTPS
-- SOCKS4
-- SOCKS5
-
-Tips:
-- Use ProxyScrape API for fresh proxies: https://docs.proxyscrape.com/
-- Check anonymity levels: Transparent, Anonymous, Elite
-- Test speed with multiple target URLs
-
-"@
-          
-          $readmeContent | Out-File -FilePath "$desktop\ProxyScrape_README.txt" -Encoding UTF8
-          
-          # Also create a PowerShell script as backup/alternative
-          $psScript = @'
-# Quick ProxyScrape API Fetch Script
-# Alternative to GUI application
-
-function Get-ProxiesFromProxyScrape {
-    param(
-        [string]$Type = "http",
-        [int]$Timeout = 10000,
-        [int]$Limit = 50
-    )
-    
-    $url = "https://api.proxyscrape.com/?request=displayproxies&protocol=$Type&timeout=$Timeout&country=all&ssl=all&anonymity=all"
-    
-    try {
-        $proxies = (Invoke-RestMethod -Uri $url).Trim() -split "`r?`n"
-        
-        if ($Limit -gt 0) {
-            $proxies = $proxies[0..($Limit-1)]
-        }
-        
-        Write-Host "Found $($proxies.Count) proxies"
-        
-        # Save to desktop
-        $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
-        $filePath = "$env:USERPROFILE\Desktop\proxies_${Type}_${timestamp}.txt"
-        $proxies | Out-File -FilePath $filePath
-        Write-Host "Saved to: $filePath"
-        
-        return $proxies
-    }
-    catch {
-        Write-Error "Failed to fetch proxies: $_"
-        return @()
-    }
-}
-
-# Example usage:
-# Get-ProxiesFromProxyScrape -Type "http" -Limit 100
-# Get-ProxiesFromProxyScrape -Type "socks4" -Limit 50
-'@
-          
-          $psScript | Out-File -FilePath "C:\Tools\ProxyScrape-API.ps1" -Encoding UTF8
-          
-          Write-Host "✓ ProxyScrape Proxy Checker installed successfully"
-          Write-Host "✓ Desktop shortcut created: 'ProxyScrape Proxy Checker.lnk'"
-          Write-Host "✓ PowerShell API script created: C:\Tools\ProxyScrape-API.ps1"
-
-      # 8. Connect Tailscale
-      - name: Establish Tailscale Connection
-        env:
-          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+      - name: Install ProxyScrape Proxy Checker
         run: |
-          if (-not $env:TAILSCALE_AUTH_KEY) {
-              Write-Error "TAILSCALE_AUTH_KEY secret is not set!"
-              Write-Host "Please add your Tailscale auth key to repository secrets:"
-              Write-Host "1. Go to Repository Settings > Secrets and variables > Actions"
-              Write-Host "2. Add new secret named TAILSCALE_AUTH_KEY"
-              Write-Host "3. Get auth key from: https://login.tailscale.com/admin/settings/keys"
-              exit 1
-          }
+          Write-Host "Installing ProxyScrape Proxy Checker..."
           
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=$env:TAILSCALE_AUTH_KEY --hostname=gh-runner-$env:GITHUB_RUN_ID --reset
+          # Download
+          $proxyCheckerUrl = "https://downloads.cdn.proxyscrape.com/proxy-checker/proxyscrape-proxy-checker-v1.1.0-x64-win-installer.exe"
+          $installer = "$env:TEMP\proxyscrape-checker.exe"
+          Invoke-WebRequest -Uri $proxyCheckerUrl -OutFile $installer
           
-          # Wait for IP assignment
-          $tsIP = $null
-          $retries = 0
-          while (-not $tsIP -and $retries -lt 20) {
-              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
-              if (-not $tsIP) {
-                  Write-Host "Waiting for Tailscale IP... ($retries/20)"
-                  Start-Sleep -Seconds 3
-                  $retries++
-              }
-          }
+          # Install silently
+          Start-Process -FilePath $installer -ArgumentList "/S" -Wait
           
-          if (-not $tsIP) {
-              Write-Error "Tailscale IP not assigned after 60 seconds"
-              exit 1
-          }
+          # Create shortcut
+          $shell = New-Object -ComObject WScript.Shell
+          $shortcut = $shell.CreateShortcut("$env:USERPROFILE\Desktop\ProxyScrape Proxy Checker.lnk")
+          $shortcut.TargetPath = "C:\Program Files\ProxyScrape Proxy Checker\proxyscrape-proxy-checker.exe"
+          $shortcut.Save()
           
-          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
-          Write-Host "Tailscale IP: $tsIP"
+          Write-Host "✓ ProxyScrape Proxy Checker installed"
 
-      # 9. Verify RDP
-      - name: Verify RDP Accessibility
-        run: |
-          Write-Host "Testing RDP connection to: $env:TAILSCALE_IP"
-          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389 -WarningAction SilentlyContinue
-          if ($testResult.TcpTestSucceeded) {
-              Write-Host "✓ RDP Port 3389 is accessible"
-          } else {
-              Write-Host "✗ RDP Port 3389 is NOT accessible"
-              Write-Host "Testing local RDP..."
-              Test-NetConnection -ComputerName localhost -Port 3389
-          }
-
-      # 10. Display Connection Info
       - name: Display Connection Info
         run: |
-          # Get Tailscale IP again to be sure
-          $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+          # Get Tailscale IP if available
+          $tsIP = ""
+          if (Test-Path "C:\Program Files\Tailscale\tailscale.exe") {
+              $tsIP = & "C:\Program Files\Tailscale\tailscale.exe" ip -4 2>$null
+          }
           
           Write-Host ""
-          Write-Host "================================================"
-          Write-Host "   🚀 RDP SESSION READY - FULL STACK INSTALLED"
-          Write-Host "================================================"
-          Write-Host "IP Address : $tsIP"
-          Write-Host "Username   : runneradmin"
-          Write-Host "Password   : $env:RDP_PASSWORD"
-          Write-Host "-----------------------------------------------"
-          Write-Host "Backup User: RDP"
-          Write-Host "Backup Pass: Same as above"
-          Write-Host "================================================"
+          Write-Host "══════════════════════════════════════════════════"
+          Write-Host "           ✅ RDP SETUP COMPLETE"
+          Write-Host "══════════════════════════════════════════════════"
+          Write-Host ""
+          Write-Host "📱 CONNECT WITH:"
+          Write-Host "   Username: rdpuser"
+          Write-Host "   Password: $env:RDP_PASSWORD"
+          Write-Host ""
+          
+          if ($tsIP) {
+              Write-Host "🔗 Tailscale IP: $tsIP"
+              Write-Host "   Connect via: mstsc /v:$tsIP"
+          } else {
+              Write-Host "🔗 Connect to this machine's public IP"
+          }
+          
+          Write-Host ""
           Write-Host "📦 INSTALLED SOFTWARE:"
+          Write-Host "   • Chrome, Firefox, VS Code"
+          Write-Host "   • Git, Python, Node.js"
+          Write-Host "   • XAMPP (Apache + MySQL + PHP)"
+          Write-Host "   • ProxyScrape Proxy Checker"
+          Write-Host "   • Notepad++, 7-Zip"
           Write-Host ""
-          Write-Host "⚡ DEVELOPMENT STACK:"
-          Write-Host "  • XAMPP (Apache, MySQL, PHP)"
-          Write-Host "  • VS Code, Git, Python, Node.js"
-          Write-Host "  • Notepad++, 7-Zip"
+          Write-Host "💡 Shortcuts available on Desktop"
+          Write-Host "══════════════════════════════════════════════════"
+          
+          # Keep the runner alive
           Write-Host ""
-          Write-Host "🌐 PROXY TOOLS:"
-          Write-Host "  • ProxyScrape Proxy Checker (Official GUI)"
-          Write-Host "  • ProxyScrape API PowerShell Script"
-          Write-Host "  • Chrome, Firefox"
-          Write-Host ""
-          Write-Host "🔧 UTILITIES:"
-          Write-Host "  • PowerShell 7, Windows Terminal"
-          Write-Host "  • Putty, curl, wget"
-          Write-Host "  • Tailscale VPN"
-          Write-Host "================================================"
-          Write-Host "💡 QUICK START:"
-          Write-Host "1. Connect via RDP client to IP above"
-          Write-Host "2. Find shortcuts on Desktop:"
-          Write-Host "   • ProxyScrape Proxy Checker.lnk"
-          Write-Host "   • XAMPP Control Panel.lnk"
-          Write-Host "   • Tools Folder.lnk"
-          Write-Host "3. Check Desktop for README files"
-          Write-Host "================================================"
+          Write-Host "⏰ RDP session will stay active for 60 minutes..."
+          Write-Host "   Press Ctrl+C in runner or cancel workflow to stop."
           Write-Host ""
           
-          # Keep session alive
-          Write-Host "Session will remain active for up to 60 minutes..."
-          Write-Host "Press 'Cancel workflow' in GitHub to stop."
-          Write-Host ""
-          
-          $counter = 0
+          # Keep-alive loop
+          $startTime = Get-Date
           while ($true) {
-              $counter++
-              $time = Get-Date -Format "HH:mm:ss"
-              Write-Host "[$time] Session active for $counter minutes..."
-              
-              # Update Tailscale IP every 5 minutes
-              if ($counter % 5 -eq 0) {
-                  $currentIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
-                  Write-Host "Current Tailscale IP: $currentIP"
-              }
-              
+              $elapsed = (Get-Date) - $startTime
+              Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Active for $([math]::Floor($elapsed.TotalMinutes)) minutes"
               Start-Sleep -Seconds 60
           }
