@@ -1,0 +1,94 @@
+name: Windows RDP with Tailscale
+
+on:
+  workflow_dispatch:  # Manual trigger
+    inputs:
+      duration_minutes:
+        description: 'Run duration (max 360 min)'
+        required: true
+        default: '360'
+
+env:
+  TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+  WINDOWS_PASSWORD: ${{ secrets.WINDOWS_PASSWORD }}
+
+jobs:
+  windows-rdp:
+    runs-on: windows-latest  # GitHub's Windows runner
+    
+    timeout-minutes: ${{ github.event.inputs.duration_minutes || 360 }}
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      
+    - name: Install Tailscale
+      run: |
+        # Download and install Tailscale silently
+        $tailscaleUrl = "https://pkgs.tailscale.com/stable/windows/tailscale-setup-latest.exe"
+        $installerPath = "$env:TEMP\tailscale-setup.exe"
+        
+        Invoke-WebRequest -Uri $tailscaleUrl -OutFile $installerPath
+        Start-Process -FilePath $installerPath -ArgumentList "/S" -Wait
+        
+        # Wait for service to install
+        Start-Sleep -Seconds 10
+        
+    - name: Start Tailscale and configure RDP
+      run: |
+        # Start Tailscale with your auth key
+        & "C:\Program Files\Tailscale\tailscale.exe" up --authkey="$env:TAILSCALE_AUTH_KEY" --accept-dns=false
+        
+        # Get Tailscale IP
+        $tailscaleIP = & "C:\Program Files\Tailscale\tailscale.exe" ip -4
+        echo "TAILSCALE_IP=$tailscaleIP" >> $env:GITHUB_ENV
+        
+        # Enable Remote Desktop
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -name "fDenyTSConnections" -Value 0
+        
+        # Configure firewall
+        Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+        
+        # Set network to private (required for RDP)
+        Set-NetConnectionProfile -NetworkCategory Private
+        
+        # Optional: Create a user (if using GitHub runner's default user)
+        # net user github "$env:WINDOWS_PASSWORD" /add
+        # net localgroup administrators github /add
+        
+    - name: Display connection information
+      run: |
+        Write-Host "========================================" -ForegroundColor Green
+        Write-Host "RDP CONNECTION READY!" -ForegroundColor Green
+        Write-Host "========================================" -ForegroundColor Green
+        Write-Host ""
+        Write-Host "1. Open Tailscale Admin Console:" -ForegroundColor Yellow
+        Write-Host "   https://login.tailscale.com/admin/machines" -ForegroundColor Cyan
+        Write-Host ""
+        Write-Host "2. Look for machine named:" -ForegroundColor Yellow
+        Write-Host "   $env:COMPUTERNAME" -ForegroundColor Cyan
+        Write-Host ""
+        Write-Host "3. Connect via RDP to:" -ForegroundColor Yellow
+        Write-Host "   Address: $env:TAILSCALE_IP" -ForegroundColor Cyan
+        Write-Host "   Username: runneradmin (or your configured user)" -ForegroundColor Cyan
+        Write-Host "   Password: Check GitHub Secrets" -ForegroundColor Cyan
+        Write-Host ""
+        Write-Host "4. Workflow will run for: ${{ github.event.inputs.duration_minutes || 360 }} minutes" -ForegroundColor Yellow
+        Write-Host ""
+        Write-Host "========================================" -ForegroundColor Green
+        
+    - name: Keep runner alive (RDP session)
+      run: |
+        # This keeps the runner from timing out immediately
+        $duration = ${{ github.event.inputs.duration_minutes || 360 }}
+        $seconds = $duration * 60
+        Write-Host "RDP will be available for $duration minutes"
+        
+        # Keep-alive loop
+        $startTime = Get-Date
+        while (((Get-Date) - $startTime).TotalSeconds -lt $seconds) {
+          Write-Host "Time remaining: $($seconds - ((Get-Date) - $startTime).TotalSeconds) seconds"
+          Start-Sleep -Seconds 30
+        }
+        
+        Write-Host "Time's up! Shutting down RDP..."
