@@ -1,4 +1,4 @@
-name: R Fixed
+name: Proxy Checker
 
 on:
   workflow_dispatch:
